@@ -13,11 +13,11 @@ jobs:
 
     # Map uppercase secrets -> lowercase env your code reads
     env:
-      host:     ${{ secrets.DB_HOST }}
-      dbname:   ${{ secrets.DB_NAME }}
-      user:     ${{ secrets.DB_USER }}
-      password: ${{ secrets.DB_PASS }}
-      port:     ${{ secrets.DB_PORT }}
+      DB_HOST:     ${{ secrets.DB_HOST }}
+      DB_NAME:     ${{ secrets.DB_NAME }}
+      DB_USER:     ${{ secrets.DB_USER }}
+      DB_PASS:     ${{ secrets.DB_PASS }}
+      DB_PORT:     ${{ secrets.DB_PORT }}
       SYMBOLS: BTC-USD,ETH-USD
 
 
