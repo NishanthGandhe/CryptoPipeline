@@ -61,7 +61,7 @@ jobs:
           python - <<'PY'
           import os, psycopg
           host, db, user, pwd = os.environ["host"], os.environ["dbname"], os.environ["user"], os.environ["password"]
-          with psycopg.connect(host=host, dbname=db, user=user, password=pwd, sslmode="require") as conn:
+          with psycopg.connect(user=user, password=pwd, host=host, port=os.environ["port"], dbname=db) as conn:
               with conn.cursor() as cur:
                   cur.execute("select count(*) from gold_daily_metrics")
                   print("gold_daily_metrics rows:", cur.fetchone()[0])
