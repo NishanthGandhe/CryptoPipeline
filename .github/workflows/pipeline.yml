@@ -3,7 +3,7 @@ name: cryptopipe-hourly
 
 on:
   schedule:
-    - cron: "5 * * * *"
+    - cron: "5 * * * *"   # HH:05 UTC every hour
   workflow_dispatch:
 
 jobs:
@@ -11,13 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
-    # 👇 Map your lowercase secrets to the DB_* env vars your code reads
+    # Map your GitHub Secrets (lowercase) directly to the env names your code expects
     env:
-      DB_HOST: ${{ secrets.host }}
-      DB_NAME: ${{ secrets.dbname }}
-      DB_USER: ${{ secrets.user }}
-      DB_PASS: ${{ secrets.password }}
-      DB_PORT: ${{ secrets.port }}
+      host:     ${{ secrets.host }}
+      dbname:   ${{ secrets.dbname }}
+      user:     ${{ secrets.user }}
+      password: ${{ secrets.password }}
+      port:     ${{ secrets.port }}
 
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r pipeline/requirements.txt
+
+      # Optional: sanity-print (masked) to confirm envs are present (no password)
+      - name: Show connection target (masked)
+        run: |
+          python - <<'PY'
+          import os
+          print("CONNECT TO:", os.getenv("host"), os.getenv("dbname"), os.getenv("user"), os.getenv("port"))
+          assert all([os.getenv("host"), os.getenv("dbname"), os.getenv("user"), os.getenv("port")]), "Missing one or more DB envs"
+          PY
 
       - name: Ingest bronze
         run: python pipeline/ingest.py
@@ -44,7 +53,14 @@ jobs:
         run: |
           python - <<'PY'
           import os, psycopg
-            with psycopg.connect(user=os.environ["DB_USER"], password=os.environ["DB_PASS"], host=os.environ["DB_HOST"], port=int(os.environ.get("DB_PORT", "5432")), dbname=os.environ["DB_NAME"]) as conn:
+          with psycopg.connect(
+              host=os.environ["host"],
+              dbname=os.environ["dbname"],
+              user=os.environ["user"],
+              password=os.environ["password"],
+              port=int(os.environ.get("port", "5432")),
+              sslmode="require",
+          ) as conn:
               with conn.cursor() as cur:
                   cur.execute("select count(*) from gold_daily_metrics")
                   print("gold_daily_metrics rows:", cur.fetchone()[0])
