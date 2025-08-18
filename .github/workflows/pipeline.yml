@@ -18,6 +18,8 @@ jobs:
       user:     ${{ secrets.DB_USER }}
       password: ${{ secrets.DB_PASS }}
       port:     ${{ secrets.DB_PORT }}
+      SYMBOLS: BTC-USD,ETH-USD
+
 
     steps:
       - uses: actions/checkout@v4
