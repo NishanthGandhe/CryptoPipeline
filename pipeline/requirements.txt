@@ -1,4 +1,6 @@
-requests
-python-dotenv
+statsmodels
+numpy
 pandas
 psycopg[binary]
+python-dotenv
+requests

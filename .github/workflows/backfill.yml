@@ -1,0 +1,32 @@
+name: cryptopipe-backfill
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days to backfill"
+        default: "365"
+        required: true
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    env:
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASS: ${{ secrets.DB_PASS }}
+      DB_PORT: ${{ secrets.DB_PORT }}
+      SYMBOLS: BTC-USD,ETH-USD
+      BACKFILL_DAYS: ${{ github.event.inputs.days }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r pipeline/requirements.txt
+      - name: Backfill + ETL + insights
+        run: |
+          python pipeline/ingest.py
+          python pipeline/run_etl.py
+          python pipeline/generate_insight.py
