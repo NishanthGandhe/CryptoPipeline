@@ -1,20 +1,28 @@
+# .github/workflows/pipeline.yml
 name: cryptopipe-hourly
 
 on:
   schedule:
-    - cron: "5 * * * *"    # runs at HH:05 every hour (UTC)
-  workflow_dispatch:        # allow manual runs from GitHub UI
+    - cron: "5 * * * *"
+  workflow_dispatch:
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    steps:
-      - name: Check out repo
-        uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    # 👇 Map your lowercase secrets to the DB_* env vars your code reads
+    env:
+      DB_HOST: ${{ secrets.host }}
+      DB_NAME: ${{ secrets.dbname }}
+      DB_USER: ${{ secrets.user }}
+      DB_PASS: ${{ secrets.password }}
+      DB_PORT: ${{ secrets.port }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
@@ -24,44 +32,19 @@ jobs:
           pip install -r pipeline/requirements.txt
 
       - name: Ingest bronze
-        env:
-            DB_HOST: ${{ secrets.host }}
-            DB_NAME: ${{ secrets.dbname }}
-            DB_USER: ${{ secrets.user }}
-            DB_PASS: ${{ secrets.password }}
-            DB_PORT: ${{ secrets.port }}
         run: python pipeline/ingest.py
 
       - name: Run transforms (silver & gold)
-        env:
-            DB_HOST: ${{ secrets.host }}
-            DB_NAME: ${{ secrets.dbname }}
-            DB_USER: ${{ secrets.user }}
-            DB_PASS: ${{ secrets.password }}
-            DB_PORT: ${{ secrets.port }}
         run: python pipeline/run_etl.py
 
       - name: Generate forecast + insight
-        env:
-            DB_HOST: ${{ secrets.host }}
-            DB_NAME: ${{ secrets.dbname }}
-            DB_USER: ${{ secrets.user }}
-            DB_PASS: ${{ secrets.password }}
-            DB_PORT: ${{ secrets.port }}
         run: python pipeline/generate_insight.py
 
-      - name: Quick health check
-        env:
-          DB_HOST: ${{ secrets.host }}
-          DB_NAME: ${{ secrets.dbname }}
-          DB_USER: ${{ secrets.user }}
-          DB_PASS: ${{ secrets.password }}
-          DB_PORT: ${{ secrets.port }}
+      - name: Health check
         run: |
           python - <<'PY'
           import os, psycopg
-          host, db, user, pwd = os.environ["host"], os.environ["dbname"], os.environ["user"], os.environ["password"]
-          with psycopg.connect(user=user, password=pwd, host=host, port=os.environ["port"], dbname=db) as conn:
+            with psycopg.connect(user=os.environ["DB_USER"], password=os.environ["DB_PASS"], host=os.environ["DB_HOST"], port=int(os.environ.get("DB_PORT", "5432")), dbname=os.environ["DB_NAME"]) as conn:
               with conn.cursor() as cur:
                   cur.execute("select count(*) from gold_daily_metrics")
                   print("gold_daily_metrics rows:", cur.fetchone()[0])
