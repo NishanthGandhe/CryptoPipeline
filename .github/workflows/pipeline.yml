@@ -1,0 +1,70 @@
+name: cryptopipe-hourly
+
+on:
+  schedule:
+    - cron: "5 * * * *"    # runs at HH:05 every hour (UTC)
+  workflow_dispatch:        # allow manual runs from GitHub UI
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r pipeline/requirements.txt
+
+      - name: Ingest bronze
+        env:
+            DB_HOST: ${{ secrets.host }}
+            DB_NAME: ${{ secrets.dbname }}
+            DB_USER: ${{ secrets.user }}
+            DB_PASS: ${{ secrets.password }}
+            DB_PORT: ${{ secrets.port }}
+        run: python pipeline/ingest.py
+
+      - name: Run transforms (silver & gold)
+        env:
+            DB_HOST: ${{ secrets.host }}
+            DB_NAME: ${{ secrets.dbname }}
+            DB_USER: ${{ secrets.user }}
+            DB_PASS: ${{ secrets.password }}
+            DB_PORT: ${{ secrets.port }}
+        run: python pipeline/run_etl.py
+
+      - name: Generate forecast + insight
+        env:
+            DB_HOST: ${{ secrets.host }}
+            DB_NAME: ${{ secrets.dbname }}
+            DB_USER: ${{ secrets.user }}
+            DB_PASS: ${{ secrets.password }}
+            DB_PORT: ${{ secrets.port }}
+        run: python pipeline/generate_insight.py
+
+      - name: Quick health check
+        env:
+          DB_HOST: ${{ secrets.host }}
+          DB_NAME: ${{ secrets.dbname }}
+          DB_USER: ${{ secrets.user }}
+          DB_PASS: ${{ secrets.password }}
+          DB_PORT: ${{ secrets.port }}
+        run: |
+          python - <<'PY'
+          import os, psycopg
+          host, db, user, pwd = os.environ["host"], os.environ["dbname"], os.environ["user"], os.environ["password"]
+          with psycopg.connect(host=host, dbname=db, user=user, password=pwd, sslmode="require") as conn:
+              with conn.cursor() as cur:
+                  cur.execute("select count(*) from gold_daily_metrics")
+                  print("gold_daily_metrics rows:", cur.fetchone()[0])
+                  cur.execute("select count(*) from insights")
+                  print("insights rows:", cur.fetchone()[0])
+          PY
