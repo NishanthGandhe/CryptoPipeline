@@ -97,22 +97,39 @@ def safe_conf_int_from_resid_log(pred_level, resid_log, z=1.96):
     return lo, hi
 
 def load_series(cur, symbol, min_rows=100):
+    # pull daily gold series
     cur.execute("""
         select ds, close
         from gold_daily_metrics
-        where symbol=%s
+        where symbol = %s
         order by ds
     """, (symbol,))
     rows = cur.fetchall()
-    if len(rows) < min_rows:
+    if not rows or len(rows) < min_rows:
         return None
-    df = pd.DataFrame(rows, columns=["ds","close"]).dropna()
-    df = df.set_index("ds").asfreq("D")
-    df["close"] = df["close"].interpolate("time")
-    # optional rolling train window
+
+    df = pd.DataFrame(rows, columns=["ds", "close"]).dropna()
+
+    # 🔧 ensure proper types
+    df["ds"] = pd.to_datetime(df["ds"], utc=False)          # date -> datetime64[ns]
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+
+    # 🔧 make a clean daily DateTimeIndex
+    df = df.dropna(subset=["close"]).sort_values("ds")
+    df = df[~df["ds"].duplicated(keep="last")]              # drop duplicate days if any
+    df = df.set_index("ds")
+
+    # 🔧 reindex to a full daily range (fills gaps), then time-interpolate
+    full_idx = pd.date_range(df.index.min(), df.index.max(), freq="D")
+    df = df.reindex(full_idx)
+    df.index.name = "ds"
+    df["close"] = df["close"].interpolate(method="time").ffill().bfill()
+
+    # optional rolling window
     if TRAIN_WINDOW_DAYS > 0:
-        cutoff = df.index.max() - pd.Timedelta(days=TRAIN_WINDOW_DAYS-1)
+        cutoff = df.index.max() - pd.Timedelta(days=TRAIN_WINDOW_DAYS - 1)
         df = df[df.index >= cutoff]
+
     return df
 
 # ---------- optional: tiny LSTM for short-horizon ----------
