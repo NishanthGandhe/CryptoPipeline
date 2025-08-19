@@ -11,6 +11,9 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 warnings.filterwarnings("ignore")
 load_dotenv()
 
+# how much worse a non-naive model can be vs naive and still be chosen
+PREFER_NON_NAIVE_EPS = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2%
+
 HORIZONS = [
     ("1d", 1),
     ("1w", 7),
@@ -63,6 +66,13 @@ def load_series(cur, symbol, min_rows=50):
     return df
 
 def train_candidates(df):
+    """
+    Try Naive, Holt-Winters, SARIMAX. Pick best by MAE, but prefer a non-naive model
+    if it's within MODEL_PREFER_NON_NAIVE_EPS (default 2%) of naive on the holdout.
+    Returns (candidates_list, best_summary_dict).
+    """
+    eps = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2% tolerance
+
     y = df["close"].astype(float)
     n = len(y)
     holdout = max(14, n // 10, 7)
@@ -74,7 +84,9 @@ def train_candidates(df):
             "holdout_mae": None, "vs_naive_improve": 0.0,
             "holdout_len": holdout, "n_train": n - holdout,
             "naive_mae": None,
-            "best_model": None, "best_type": "naive"
+            "best_model": None, "best_type": "naive",
+            "y_train": y.iloc[:-holdout] if n > holdout else y,
+            "y_full": y,
         }
 
     y_train = y.iloc[:-holdout]
@@ -82,12 +94,13 @@ def train_candidates(df):
 
     cand = []
 
-    # Naive
+    # 1) Naive
     naive_pred = np.repeat(y_train.iloc[-1], holdout)
     naive_mae = mae(y_test, naive_pred)
-    cand.append({"method":"naive_close","mae":naive_mae,"type":"naive"})
+    cand.append({"method": "naive_close", "mae": naive_mae, "type": "naive"})
 
-    # Holt-Winters
+    # 2) Holt-Winters (trend + weekly seasonality)
+    hw_mae = math.inf
     try:
         hw = ExponentialSmoothing(
             y_train, trend="add", seasonal="add", seasonal_periods=7,
@@ -95,39 +108,49 @@ def train_candidates(df):
         ).fit(optimized=True, use_brute=True)
         hw_pred = hw.forecast(holdout)
         hw_mae = mae(y_test, hw_pred)
-        cand.append({"method":"holtwinters_add_add_7","mae":hw_mae,"type":"hw","model":hw})
+        cand.append({"method": "holtwinters_add_add_7", "mae": hw_mae, "type": "hw", "model": hw})
     except Exception as e:
-        cand.append({"method":"holtwinters_failed","mae":math.inf,"type":"hw_failed","notes":str(e)})
+        cand.append({"method": "holtwinters_failed", "mae": math.inf, "type": "hw_failed", "notes": str(e)})
 
-    # SARIMAX
+    # 3) SARIMAX (light weekly seasonality)
+    sar_mae = math.inf
     try:
         sar = SARIMAX(
-            y_train, order=(1,1,1),
-            seasonal_order=(0,1,1,7),
+            y_train, order=(1, 1, 1),
+            seasonal_order=(0, 1, 1, 7),
             enforce_stationarity=False, enforce_invertibility=False
         ).fit(disp=False)
         sar_pred = sar.get_forecast(steps=holdout).predicted_mean
         sar_mae = mae(y_test, sar_pred)
-        cand.append({"method":"sarimax_111_0117","mae":sar_mae,"type":"sarimax","model":sar})
+        cand.append({"method": "sarimax_111_0117", "mae": sar_mae, "type": "sarimax", "model": sar})
     except Exception as e:
-        cand.append({"method":"sarimax_failed","mae":math.inf,"type":"sar_failed","notes":str(e)})
+        cand.append({"method": "sarimax_failed", "mae": math.inf, "type": "sar_failed", "notes": str(e)})
 
+    # --- selection ---
     finite = [c for c in cand if math.isfinite(c["mae"])]
     finite.sort(key=lambda c: c["mae"])
     best = finite[0] if finite else cand[0]
 
-    # One-step for the simple headline
-    if best["type"] == "hw":
+    # Prefer a non-naive model if it's within eps of naive MAE
+    non_naives = [c for c in finite if c.get("type") in ("hw", "sarimax")]
+    if best.get("type") == "naive" and non_naives and math.isfinite(naive_mae):
+        best_nn = min(non_naives, key=lambda c: c["mae"])
+        # if best non-naive is within eps of naive, choose it
+        if (best_nn["mae"] - naive_mae) / max(naive_mae, 1e-9) <= eps:
+            best = best_nn
+
+    # One-step-ahead forecast for the headline
+    if best.get("type") == "hw" and "model" in best:
         m = best["model"]
         one_fc = float(m.forecast(1).iloc[0])
-    elif best["type"] == "sarimax":
+    elif best.get("type") == "sarimax" and "model" in best:
         m = best["model"]
         one_fc = float(m.get_forecast(steps=1).predicted_mean.iloc[0])
     else:
-        one_fc = float(y.iloc[-1])
+        one_fc = float(y.iloc[-1])  # naive
 
-    improve = 0.0
     base = naive_mae if math.isfinite(naive_mae) else None
+    improve = 0.0
     if base and math.isfinite(best["mae"]):
         improve = (base - best["mae"]) / base
 
@@ -140,10 +163,11 @@ def train_candidates(df):
         "n_train": len(y_train),
         "naive_mae": base,
         "best_model": best.get("model"),
-        "best_type": best["type"],
+        "best_type": best.get("type", "naive"),
         "y_train": y_train,
         "y_full": y,
     }
+
 
 def multi_horizon_forecast(best, max_h):
     """Return (pred[1..max_h], lo95, hi95) lists using the chosen model."""

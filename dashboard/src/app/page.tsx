@@ -25,10 +25,15 @@ type MultiForecastRow = {
   created_at: string;       // from model_training_runs join
 };
 
-function daysToLabel(fromISO: string, toISO: string) {
-  const from = new Date(fromISO);
-  const to = new Date(toISO);
-  const diff = Math.round((+to - +from) / (1000 * 60 * 60 * 24));
+function parseDateUTC(iso: string) {
+  // iso like "2025-08-19" -> force UTC midnight
+  return new Date(iso + "T00:00:00Z");
+}
+
+function daysToLabelFromBase(baseISO: string, targetISO: string) {
+  const base = parseDateUTC(baseISO);
+  const target = parseDateUTC(targetISO);
+  const diff = Math.round((+target - +base) / (1000 * 60 * 60 * 24)) + 1; // 1d => 1
   if (diff === 1) return "1d";
   if (diff === 7) return "1w";
   if (diff === 30) return "1m";
@@ -39,6 +44,7 @@ function daysToLabel(fromISO: string, toISO: string) {
   if (diff === 3650) return "10y";
   return `${diff}d`;
 }
+
 
 function formatUSD(n?: number | null) {
   if (n == null) return "";
@@ -105,16 +111,16 @@ export default function Page() {
 
   // Map forecasts by friendly horizon label for quick lookup
   const horizonMap = useMemo(() => {
-    if (!latest) return {} as Record<string, MultiForecastRow>;
-    const wanted = new Set(["1d","1w","1m","3m","6m","1y","5y","10y"]);
-    const base = latest.created_at;
-    const map: Record<string, MultiForecastRow> = {};
-    for (const r of multi) {
-      const lab = daysToLabel(base, r.ds);
-      if (wanted.has(lab)) map[lab] = r;
-    }
-    return map;
-  }, [multi, latest]);
+  if (!latest) return {} as Record<string, MultiForecastRow>;
+  const wanted = new Set(["1d","1w","1m","3m","6m","1y","5y","10y"]);
+  const base = latest.forecast_for_day;     // 👈 anchor on the 1-day forecast date
+  const map: Record<string, MultiForecastRow> = {};
+  for (const r of multi) {
+    const lab = daysToLabelFromBase(latest.forecast_for_day, r.ds);
+    if (wanted.has(lab)) map[lab] = r;
+  }
+  return map;
+}, [multi, latest]);
 
   if (!mounted) {
     return <div className="min-h-screen bg-gray-50 p-6">Loading…</div>;
