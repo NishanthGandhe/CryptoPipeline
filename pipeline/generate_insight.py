@@ -1,19 +1,38 @@
 import os, math, warnings, uuid, json
-from datetime import timedelta, date
+from datetime import timedelta
 import numpy as np
 import pandas as pd
 import psycopg
 from dotenv import load_dotenv
 
+# classical models
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.statespace.sarimax import SARIMAX
+
+# optional models
+try:
+    import pmdarima as pm
+    HAVE_PM = True
+except Exception:
+    HAVE_PM = False
+
+try:
+    from prophet import Prophet
+    HAVE_PROPHET = True
+except Exception:
+    HAVE_PROPHET = False
+
+try:
+    import torch
+    import torch.nn as nn
+    HAVE_TORCH = True
+except Exception:
+    HAVE_TORCH = False
 
 warnings.filterwarnings("ignore")
 load_dotenv()
 
-# how much worse a non-naive model can be vs naive and still be chosen
-PREFER_NON_NAIVE_EPS = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2%
-
+# ---------- Config ----------
 HORIZONS = [
     ("1d", 1),
     ("1w", 7),
@@ -25,32 +44,54 @@ HORIZONS = [
     ("10y", 3650),
 ]
 
+TRAIN_WINDOW_DAYS = int(os.getenv("TRAIN_WINDOW_DAYS", "365"))
+PREFER_NON_NAIVE_EPS = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2%
+LOG_SPACE = os.getenv("LOG_SPACE", "1").lower() in ("1", "true", "yes")
+USE_PROPHET = os.getenv("USE_PROPHET", "0").lower() in ("1", "true", "yes")
+USE_DEEP = os.getenv("USE_DEEP", "0").lower() in ("1", "true", "yes")
+DEEP_EPOCHS = int(os.getenv("DEEP_EPOCHS", "40"))
+DEEP_LAG = int(os.getenv("DEEP_LAG", "30"))
+
 # ---------- DB utils ----------
 def get_conn():
-    host = os.getenv("DB_HOST")
-    db   = os.getenv("DB_NAME", "postgres")
-    user = os.getenv("DB_USER")
-    pwd  = os.getenv("DB_PASS")
+    dsn = os.getenv("SUPABASE_CONNECTION")
+    if dsn:
+        return psycopg.connect(dsn)
+    host = os.getenv("DB_HOST"); db = os.getenv("DB_NAME", "postgres")
+    user = os.getenv("DB_USER"); pwd = os.getenv("DB_PASS")
     port = int(os.getenv("DB_PORT", "5432"))
-    missing = [k for k,v in {"DB_HOST":host,"DB_NAME":db,"DB_USER":user,"DB_PASS":pwd}.items() if not v]
-    if missing:
-        raise RuntimeError(f"Missing DB envs: {missing}")
-    return psycopg.connect(host=host, dbname=db, user=user, password=pwd, port=port)
+    if not (host and user and pwd):
+        raise RuntimeError("Missing DB envs or SUPABASE_CONNECTION")
+    return psycopg.connect(host=host, dbname=db, user=user, password=pwd, port=port, sslmode="require")
 
 def get_symbols():
     raw = os.getenv("SYMBOLS", "BTC-USD")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
+# ---------- helpers ----------
 def mae(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
     return float(np.mean(np.abs(y_true - y_pred)))
 
-def safe_conf_int_from_resid(forecast, resid, z=1.96):
-    sd = float(np.std(resid)) if len(resid) else 0.0
-    return (forecast - z*sd, forecast + z*sd)
+def mae_pct(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=float)
+    denom = float(np.mean(np.abs(y_true))) or 1.0
+    return mae(y_true, y_pred) / denom
 
-def load_series(cur, symbol, min_rows=50):
+def safe_conf_int_from_resid_level(pred, resid, z=1.96):
+    sd = float(np.std(resid)) if len(resid) else 0.0
+    return (pred - z*sd, pred + z*sd)
+
+def safe_conf_int_from_resid_log(pred_level, resid_log, z=1.96):
+    # If model fit on log(y): conf on log scale → exp back to level
+    sd = float(np.std(resid_log)) if len(resid_log) else 0.0
+    mu_log = math.log(max(pred_level, 1e-12))
+    lo = math.exp(mu_log - z*sd)
+    hi = math.exp(mu_log + z*sd)
+    return (lo, hi)
+
+def load_series(cur, symbol, min_rows=100):
     cur.execute("""
         select ds, close
         from gold_daily_metrics
@@ -63,148 +104,344 @@ def load_series(cur, symbol, min_rows=50):
     df = pd.DataFrame(rows, columns=["ds","close"]).dropna()
     df = df.set_index("ds").asfreq("D")
     df["close"] = df["close"].interpolate("time")
+    # optional rolling train window
+    if TRAIN_WINDOW_DAYS > 0:
+        cutoff = df.index.max() - pd.Timedelta(days=TRAIN_WINDOW_DAYS-1)
+        df = df[df.index >= cutoff]
     return df
 
+# ---------- optional: tiny LSTM for short-horizon ----------
+class LSTMReg(nn.Module):
+    def __init__(self, input_size=1, hidden=32, layers=1):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden, num_layers=layers, batch_first=True)
+        self.head = nn.Linear(hidden, 1)
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.head(out[:, -1, :])
+
+def fit_lstm(series, lag=30, epochs=40):
+    # series: np.array shape (n,)
+    device = torch.device("cpu")
+    x, y = [], []
+    for i in range(len(series) - lag):
+        x.append(series[i:i+lag])
+        y.append(series[i+lag])
+    x = np.array(x, dtype=np.float32)[:, :, None]
+    y = np.array(y, dtype=np.float32)[:, None]
+    x_t = torch.from_numpy(x).to(device)
+    y_t = torch.from_numpy(y).to(device)
+    model = LSTMReg()
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    lossf = nn.L1Loss()
+    model.train()
+    for _ in range(epochs):
+        opt.zero_grad()
+        pred = model(x_t)
+        loss = lossf(pred, y_t)
+        loss.backward()
+        opt.step()
+    model.eval()
+    return model
+
+def lstm_forecast(model, last_window, steps):
+    # last_window: np.array length=lag
+    out = []
+    cur = last_window.astype(np.float32).copy()
+    for _ in range(steps):
+        x = torch.from_numpy(cur[None, :, None])
+        with torch.no_grad():
+            yhat = model(x).numpy().ravel()[0]
+        out.append(float(yhat))
+        cur = np.roll(cur, -1); cur[-1] = yhat
+    return np.array(out, dtype=float)
+
+# ---------- training + selection ----------
 def train_candidates(df):
     """
-    Try Naive, Holt-Winters, SARIMAX. Pick best by MAE, but prefer a non-naive model
-    if it's within MODEL_PREFER_NON_NAIVE_EPS (default 2%) of naive on the holdout.
-    Returns (candidates_list, best_summary_dict).
+    Try several models; select winner by MAE% (scale-normalized).
+    Prefer a non-naive if it is within PREFER_NON_NAIVE_EPS of naive.
+    Returns (candidates, best_summary).
     """
-    eps = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2% tolerance
+    y_level = df["close"].astype(float)
+    n = len(y_level)
 
-    y = df["close"].astype(float)
-    n = len(y)
     holdout = max(14, n // 10, 7)
-    if n <= holdout + 20:
-        last = float(y.iloc[-1])
+    if n <= holdout + 30:
+        # too short for complex models
+        last = float(y_level.iloc[-1])
         return [], {
             "method": "naive_close",
             "forecast": last,
-            "holdout_mae": None, "vs_naive_improve": 0.0,
+            "holdout_mae": None, "holdout_mae_pct": None,
+            "vs_naive_improve": 0.0,
             "holdout_len": holdout, "n_train": n - holdout,
-            "naive_mae": None,
+            "naive_mae": None, "naive_mae_pct": None,
             "best_model": None, "best_type": "naive",
-            "y_train": y.iloc[:-holdout] if n > holdout else y,
-            "y_full": y,
+            "y_train_level": y_level.iloc[:-holdout] if n > holdout else y_level,
+            "y_full_level": y_level,
         }
 
-    y_train = y.iloc[:-holdout]
-    y_test  = y.iloc[-holdout:]
+    # train / test split
+    y_train_level = y_level.iloc[:-holdout]
+    y_test_level  = y_level.iloc[-holdout:]
+
+    # transform (log) if enabled
+    if LOG_SPACE:
+        y_train = np.log(y_train_level.values)
+    else:
+        y_train = y_train_level.values
 
     cand = []
 
     # 1) Naive
-    naive_pred = np.repeat(y_train.iloc[-1], holdout)
-    naive_mae = mae(y_test, naive_pred)
-    cand.append({"method": "naive_close", "mae": naive_mae, "type": "naive"})
+    naive_pred_h = np.repeat(y_train_level.iloc[-1], holdout)
+    naive_mae_val = mae(y_test_level, naive_pred_h)
+    naive_mae_pct_val = mae_pct(y_test_level, naive_pred_h)
+    cand.append({
+        "method": "naive_close",
+        "mae": naive_mae_val,
+        "mae_pct": naive_mae_pct_val,
+        "type": "naive"
+    })
 
-    # 2) Holt-Winters (trend + weekly seasonality)
-    hw_mae = math.inf
+    # 2) Holt-Winters
     try:
         hw = ExponentialSmoothing(
-            y_train, trend="add", seasonal="add", seasonal_periods=7,
+            y_train if not LOG_SPACE else pd.Series(y_train, index=y_train_level.index),
+            trend="add", seasonal="add", seasonal_periods=7,
             initialization_method="estimated",
         ).fit(optimized=True, use_brute=True)
-        hw_pred = hw.forecast(holdout)
-        hw_mae = mae(y_test, hw_pred)
-        cand.append({"method": "holtwinters_add_add_7", "mae": hw_mae, "type": "hw", "model": hw})
+        hw_fc_t = hw.forecast(holdout).to_numpy()
+        hw_fc = np.exp(hw_fc_t) if LOG_SPACE else hw_fc_t
+        hw_mae = mae(y_test_level, hw_fc)
+        hw_mae_pct = mae_pct(y_test_level, hw_fc)
+        cand.append({"method": "holtwinters_add_add_7", "mae": hw_mae, "mae_pct": hw_mae_pct, "type": "hw", "model": hw})
     except Exception as e:
-        cand.append({"method": "holtwinters_failed", "mae": math.inf, "type": "hw_failed", "notes": str(e)})
+        cand.append({"method": "holtwinters_failed", "mae": math.inf, "mae_pct": math.inf, "type": "hw_failed", "notes": str(e)})
 
-    # 3) SARIMAX (light weekly seasonality)
-    sar_mae = math.inf
+    # 3) SARIMAX
     try:
         sar = SARIMAX(
-            y_train, order=(1, 1, 1),
-            seasonal_order=(0, 1, 1, 7),
+            y_train, order=(1,1,1), seasonal_order=(0,1,1,7),
             enforce_stationarity=False, enforce_invertibility=False
         ).fit(disp=False)
-        sar_pred = sar.get_forecast(steps=holdout).predicted_mean
-        sar_mae = mae(y_test, sar_pred)
-        cand.append({"method": "sarimax_111_0117", "mae": sar_mae, "type": "sarimax", "model": sar})
+        sar_fc_t = sar.get_forecast(steps=holdout).predicted_mean.to_numpy()
+        sar_fc = np.exp(sar_fc_t) if LOG_SPACE else sar_fc_t
+        sar_mae = mae(y_test_level, sar_fc)
+        sar_mae_pct = mae_pct(y_test_level, sar_fc)
+        cand.append({"method": "sarimax_111_0117", "mae": sar_mae, "mae_pct": sar_mae_pct, "type": "sarimax", "model": sar})
     except Exception as e:
-        cand.append({"method": "sarimax_failed", "mae": math.inf, "type": "sar_failed", "notes": str(e)})
+        cand.append({"method": "sarimax_failed", "mae": math.inf, "mae_pct": math.inf, "type": "sar_failed", "notes": str(e)})
 
-    # --- selection ---
-    finite = [c for c in cand if math.isfinite(c["mae"])]
-    finite.sort(key=lambda c: c["mae"])
+    # 4) Auto-ARIMA (pmdarima)
+    if HAVE_PM:
+        try:
+            ar = pm.auto_arima(
+                y_train, seasonal=True, m=7, suppress_warnings=True, error_action="ignore",
+                max_p=3, max_q=3, max_P=2, max_Q=2, stepwise=True
+            )
+            ar_fc_t = ar.predict(n_periods=holdout)
+            ar_fc = np.exp(ar_fc_t) if LOG_SPACE else ar_fc_t
+            ar_mae = mae(y_test_level, ar_fc)
+            ar_mae_pct = mae_pct(y_test_level, ar_fc)
+            cand.append({"method": "auto_arima_m7", "mae": ar_mae, "mae_pct": ar_mae_pct, "type": "arima", "model": ar})
+        except Exception as e:
+            cand.append({"method": "auto_arima_failed", "mae": math.inf, "mae_pct": math.inf, "type": "ar_failed", "notes": str(e)})
+    else:
+        cand.append({"method": "auto_arima_unavailable", "mae": math.inf, "mae_pct": math.inf, "type": "ar_unavail", "notes": "pmdarima not installed"})
+
+    # 5) Prophet (optional)
+    if USE_PROPHET and HAVE_PROPHET:
+        try:
+            dfp = pd.DataFrame({
+                "ds": y_train_level.index,
+                "y": np.log(y_train_level.values) if LOG_SPACE else y_train_level.values
+            })
+            m = Prophet(
+                weekly_seasonality=True, yearly_seasonality=True,
+                daily_seasonality=False, interval_width=0.95
+            ).fit(dfp)
+            fhold = m.make_future_dataframe(periods=holdout, freq="D")
+            fc = m.predict(fhold)
+            yhat_t = fc["yhat"].iloc[-holdout:].to_numpy()
+            yhat = np.exp(yhat_t) if LOG_SPACE else yhat_t
+            p_mae = mae(y_test_level, yhat)
+            p_mae_pct = mae_pct(y_test_level, yhat)
+            cand.append({"method": "prophet_w_y", "mae": p_mae, "mae_pct": p_mae_pct, "type": "prophet", "model": m})
+        except Exception as e:
+            cand.append({"method": "prophet_failed", "mae": math.inf, "mae_pct": math.inf, "type": "prophet_failed", "notes": str(e)})
+    elif USE_PROPHET and not HAVE_PROPHET:
+        cand.append({"method": "prophet_unavailable", "mae": math.inf, "mae_pct": math.inf, "type": "prophet_unavail", "notes": "prophet not installed"})
+
+    # 6) LSTM (optional, short horizon surrogate)
+    if USE_DEEP and HAVE_TORCH and len(y_train_level) > (DEEP_LAG + 60):
+        try:
+            # standardize level series (log-space already stabilizes variance, but we keep it simple here)
+            s = y_train_level.values.astype(float)
+            mu, sd = float(np.mean(s)), float(np.std(s) or 1.0)
+            s_norm = (s - mu) / sd
+            model = fit_lstm(s_norm, lag=DEEP_LAG, epochs=DEEP_EPOCHS)
+            # recursive forecast on normalized scale then destandardize
+            last_win = s_norm[-DEEP_LAG:]
+            lstm_fc_norm = lstm_forecast(model, last_win, holdout)
+            lstm_fc = lstm_fc_norm * sd + mu
+            l_mae = mae(y_test_level, lstm_fc)
+            l_mae_pct = mae_pct(y_test_level, lstm_fc)
+            cand.append({"method": "lstm_small", "mae": l_mae, "mae_pct": l_mae_pct, "type": "lstm", "model": (model, mu, sd)})
+        except Exception as e:
+            cand.append({"method": "lstm_failed", "mae": math.inf, "mae_pct": math.inf, "type": "lstm_failed", "notes": str(e)})
+    elif USE_DEEP and not HAVE_TORCH:
+        cand.append({"method": "lstm_unavailable", "mae": math.inf, "mae_pct": math.inf, "type": "lstm_unavail", "notes": "torch not installed"})
+
+    # --- selection by MAE% ---
+    finite = [c for c in cand if math.isfinite(c["mae_pct"])]
+    finite.sort(key=lambda c: c["mae_pct"])
     best = finite[0] if finite else cand[0]
 
-    # Prefer a non-naive model if it's within eps of naive MAE
-    non_naives = [c for c in finite if c.get("type") in ("hw", "sarimax")]
-    if best.get("type") == "naive" and non_naives and math.isfinite(naive_mae):
-        best_nn = min(non_naives, key=lambda c: c["mae"])
-        # if best non-naive is within eps of naive, choose it
-        if (best_nn["mae"] - naive_mae) / max(naive_mae, 1e-9) <= eps:
+    # prefer non-naive if close to naive
+    naive_c = next((c for c in finite if c["type"] == "naive"), None)
+    non_naives = [c for c in finite if c["type"] != "naive"]
+    if naive_c and best["type"] == "naive" and non_naives:
+        best_nn = min(non_naives, key=lambda c: c["mae_pct"])
+        if (best_nn["mae_pct"] - naive_c["mae_pct"]) / max(naive_c["mae_pct"], 1e-9) <= PREFER_NON_NAIVE_EPS:
             best = best_nn
 
-    # One-step-ahead forecast for the headline
-    if best.get("type") == "hw" and "model" in best:
+    # 1-step (next day) for headline
+    bt = best["type"]
+    if bt == "hw":
         m = best["model"]
-        one_fc = float(m.forecast(1).iloc[0])
-    elif best.get("type") == "sarimax" and "model" in best:
+        one_t = float(m.forecast(1).iloc[0])
+        one_fc = float(math.exp(one_t)) if LOG_SPACE else one_t
+    elif bt == "sarimax":
         m = best["model"]
-        one_fc = float(m.get_forecast(steps=1).predicted_mean.iloc[0])
+        one_t = float(m.get_forecast(steps=1).predicted_mean.iloc[0])
+        one_fc = float(math.exp(one_t)) if LOG_SPACE else one_t
+    elif bt == "arima":
+        m = best["model"]
+        one_t = float(m.predict(n_periods=1)[0])
+        one_fc = float(math.exp(one_t)) if LOG_SPACE else one_t
+    elif bt == "prophet":
+        m = best["model"]
+        df_future = m.make_future_dataframe(periods=1, freq="D")
+        yhat_t = float(m.predict(df_future)["yhat"].iloc[-1])
+        one_fc = float(math.exp(yhat_t)) if LOG_SPACE else yhat_t
+    elif bt == "lstm":
+        model, mu, sd = best["model"]
+        s = y_train_level.values.astype(float)
+        s_norm = (s - mu) / sd
+        last_win = s_norm[-DEEP_LAG:]
+        one_fc = float(lstm_forecast(model, last_win, 1)[0])
     else:
-        one_fc = float(y.iloc[-1])  # naive
+        one_fc = float(y_train_level.iloc[-1])
 
-    base = naive_mae if math.isfinite(naive_mae) else None
+    # metrics for logging
+    naive_mae_val = naive_c["mae"] if naive_c else None
+    naive_mae_pct_val = naive_c["mae_pct"] if naive_c else None
     improve = 0.0
-    if base and math.isfinite(best["mae"]):
-        improve = (base - best["mae"]) / base
+    if naive_mae_pct_val and math.isfinite(best["mae_pct"]):
+        improve = (naive_mae_pct_val - best["mae_pct"]) / naive_mae_pct_val
 
     return cand, {
         "method": best["method"],
         "forecast": one_fc,
         "holdout_mae": best["mae"] if math.isfinite(best["mae"]) else None,
+        "holdout_mae_pct": best["mae_pct"] if math.isfinite(best["mae_pct"]) else None,
         "vs_naive_improve": improve,
         "holdout_len": holdout,
-        "n_train": len(y_train),
-        "naive_mae": base,
+        "n_train": len(y_train_level),
+        "naive_mae": naive_mae_val,
+        "naive_mae_pct": naive_mae_pct_val,
         "best_model": best.get("model"),
-        "best_type": best.get("type", "naive"),
-        "y_train": y_train,
-        "y_full": y,
+        "best_type": bt,
+        "y_train_level": y_train_level,
+        "y_full_level": y_level,
     }
 
-
+# ---------- multi-horizon forecast ----------
 def multi_horizon_forecast(best, max_h):
-    """Return (pred[1..max_h], lo95, hi95) lists using the chosen model."""
-    btype = best["best_type"]
-    y_train = best["y_train"]
-    if btype == "sarimax" and best["best_model"] is not None:
+    bt = best["best_type"]
+    y_train_level = best["y_train_level"]
+
+    if bt == "sarimax":
         m = best["best_model"]
         gf = m.get_forecast(steps=max_h)
-        pred = gf.predicted_mean.to_numpy()
+        pred_t = gf.predicted_mean.to_numpy()
+        pred = np.exp(pred_t) if LOG_SPACE else pred_t
+        # CI on log if LOG_SPACE, else level
         try:
             ci95 = gf.conf_int(alpha=0.05).to_numpy()
-            lo = ci95[:,0]; hi = ci95[:,1]
+            lo_t, hi_t = ci95[:,0], ci95[:,1]
+            if LOG_SPACE:
+                lo = np.exp(lo_t); hi = np.exp(hi_t)
+            else:
+                lo, hi = lo_t, hi_t
         except Exception:
-            resid = (y_train - m.fittedvalues).to_numpy()
-            lo = pred - 1.96*np.std(resid)
-            hi = pred + 1.96*np.std(resid)
+            resid = (y_train_level.values - pred[:len(y_train_level)])  # fallback rough
+            lo, hi = safe_conf_int_from_resid_level(pred, resid, 1.96)
         return pred, lo, hi
-    elif btype == "hw" and best["best_model"] is not None:
-        m = best["best_model"]
-        pred = m.forecast(max_h).to_numpy()
-        resid = (y_train - m.fittedvalues.reindex_like(y_train).fillna(method="bfill")).to_numpy()
-        sd = np.std(resid) if len(resid) else 0.0
-        lo = pred - 1.96*sd
-        hi = pred + 1.96*sd
-        return pred, lo, hi
-    else:
-        # naive: flat line
-        last = float(best["y_full"].iloc[-1])
-        pred = np.repeat(last, max_h)
-        return pred, np.full(max_h, np.nan), np.full(max_h, np.nan)
 
+    if bt == "hw":
+        m = best["best_model"]
+        pred_t = m.forecast(max_h).to_numpy()
+        pred = np.exp(pred_t) if LOG_SPACE else pred_t
+        # residuals
+        if LOG_SPACE:
+            fitted_t = m.fittedvalues.reindex_like(best["y_train_level"]).fillna(method="bfill").to_numpy()
+            resid_log = np.log(y_train_level.values) - fitted_t
+            lo, hi = safe_conf_int_from_resid_log(pred, resid_log, 1.96)
+        else:
+            resid = y_train_level.values - m.fittedvalues.reindex_like(y_train_level).fillna(method="bfill").to_numpy()
+            lo, hi = safe_conf_int_from_resid_level(pred, resid, 1.96)
+        return pred, lo, hi
+
+    if bt == "arima":
+        m = best["best_model"]
+        if hasattr(m, "predict_in_sample"):  # pmdarima
+            pred_t, ci = m.predict(n_periods=max_h, return_conf_int=True, alpha=0.05)
+            pred = np.exp(pred_t) if LOG_SPACE else pred_t
+            lo_t, hi_t = ci[:,0], ci[:,1]
+            lo = np.exp(lo_t) if LOG_SPACE else lo_t
+            hi = np.exp(hi_t) if LOG_SPACE else hi_t
+            return pred, lo, hi
+
+    if bt == "prophet":
+        m = best["best_model"]
+        future = m.make_future_dataframe(periods=max_h, freq="D")
+        fc = m.predict(future).iloc[-max_h:]
+        yhat_t = fc["yhat"].to_numpy()
+        pred = np.exp(yhat_t) if LOG_SPACE else yhat_t
+        # Prophet gives 80% by default; we asked 95% via interval_width
+        lo_t = fc["yhat_lower"].to_numpy(); hi_t = fc["yhat_upper"].to_numpy()
+        lo = np.exp(lo_t) if LOG_SPACE else lo_t
+        hi = np.exp(hi_t) if LOG_SPACE else hi_t
+        return pred, lo, hi
+
+    if bt == "lstm":
+        model, mu, sd = best["best_model"]
+        s = y_train_level.values.astype(float)
+        s_norm = (s - mu) / sd
+        last_win = s_norm[-DEEP_LAG:]
+        pred = lstm_forecast(model, last_win, max_h)
+        # no CI for LSTM
+        lo = np.full(max_h, np.nan)
+        hi = np.full(max_h, np.nan)
+        return pred, lo, hi
+
+    # naive fallback
+    last = float(y_train_level.iloc[-1])
+    pred = np.repeat(last, max_h)
+    lo = np.full(max_h, np.nan)
+    hi = np.full(max_h, np.nan)
+    return pred, lo, hi
+
+# ---------- main: trains, logs, writes multi-horizon ----------
 def main():
     symbols = get_symbols()
     inserted = 0
     with get_conn() as conn, conn.cursor() as cur:
         for sym in symbols:
-            df = load_series(cur, sym, min_rows=50)
+            df = load_series(cur, sym, min_rows=100)
             if df is None:
                 print(f"{sym}: not enough history; skipping.")
                 continue
@@ -213,11 +450,9 @@ def main():
             last_ds = df.index[-1].date()
             ds_next = last_ds + timedelta(days=1)
             max_h = max(h for _, h in HORIZONS)
-
-            # Fresh run_id that we control
             run_id = uuid.uuid4()
 
-            # 1) Log training run FIRST
+            # 1) training run
             cur.execute("""
                 insert into model_training_runs
                   (run_id, symbol, ds_next, ds_train_end, holdout_len, n_train,
@@ -228,17 +463,19 @@ def main():
                 best["naive_mae"], best["method"], best["holdout_mae"], best["vs_naive_improve"]
             ))
 
-            # Safety check: ensure the FK target exists before forecasts
-            cur.execute("select 1 from model_training_runs where run_id = %s", (run_id,))
-            assert cur.fetchone(), "training run missing just after insert?!"
-
-            # 2) Log candidates (optional but useful)
+            # 2) candidates
             for c in cand:
                 params = None
-                if c.get("method","").startswith("holtwinters"):
-                    params = {"trend":"add","seasonal":"add","seasonal_periods":7}
-                elif c.get("method","").startswith("sarimax"):
-                    params = {"order":[1,1,1], "seasonal_order":[0,1,1,7]}
+                if c.get("type") == "hw":
+                    params = {"trend":"add","seasonal":"add","seasonal_periods":7, "log_space": LOG_SPACE}
+                elif c.get("type") == "sarimax":
+                    params = {"order":[1,1,1], "seasonal_order":[0,1,1,7], "log_space": LOG_SPACE}
+                elif c.get("type") == "arima":
+                    params = {"auto": True, "m":7, "log_space": LOG_SPACE}
+                elif c.get("type") == "prophet":
+                    params = {"weekly":True, "yearly":True, "interval":"95%", "log_space": LOG_SPACE}
+                elif c.get("type") == "lstm":
+                    params = {"lag": DEEP_LAG, "epochs": DEEP_EPOCHS}
                 cur.execute("""
                     insert into model_training_candidates (run_id, method, mae, params, notes)
                     values (%s,%s,%s,%s,%s)
@@ -249,34 +486,34 @@ def main():
                     c.get("notes")
                 ))
 
-            # 3) Forecast multiple horizons with the chosen model
+            # 3) forecasts (multi-horizon, upsert)
             pred, lo95, hi95 = multi_horizon_forecast(best, max_h)
-
-            # UPSERT each horizon so retries are safe
             for label, h in HORIZONS:
                 tgt = last_ds + timedelta(days=h)
-                fc = float(pred[h-1])  # horizons are 1-indexed
+                fc = float(pred[h-1])
                 cur.execute("""
                     insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
-                    values (%s, %s, %s, %s, %s)
+                    values (%s,%s,%s,%s,%s)
                     on conflict (run_id, ds) do update
                       set forecast_close = excluded.forecast_close,
                           forecast_method = excluded.forecast_method
                 """, (run_id, sym, tgt, fc, best["method"]))
 
-            # 4) Human-friendly insight (short)
+            # 4) human-friendly insight
             def fmt(x): return f"${x:,.2f}"
             one_d = float(pred[0]); one_w = float(pred[7-1]); one_m = float(pred[30-1])
             headline = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
-
             details_bits = []
-            if best["holdout_mae"] is not None:
+            if best.get("holdout_mae") is not None:
                 details_bits.append(f"MAE={best['holdout_mae']:.2f}")
+            if best.get("holdout_mae_pct") is not None:
+                details_bits.append(f"MAE%={best['holdout_mae_pct']:.4f}")
             if best["vs_naive_improve"] is not None:
                 details_bits.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
+            # CI for 1d if we have it
             if not np.isnan(lo95[0]):
                 details_bits.append(f"1d 95% CI [{fmt(lo95[0])}, {fmt(hi95[0])}]")
-            details_bits.append("Long-horizon forecasts have high uncertainty.")
+            details_bits.append("Long-horizon forecasts are highly uncertain.")
             details = "; ".join(details_bits)
 
             cur.execute("""
@@ -285,7 +522,7 @@ def main():
             """, (run_id, sym, headline, details))
 
             inserted += 1
-            print(f"[{sym}] run_id={run_id} wrote {len(HORIZONS)} horizons + insight")
+            print(f"[{sym}] {best['method']} | run_id={run_id} | wrote {len(HORIZONS)} horizons")
 
         print(f"Inserted {inserted} runs")
 

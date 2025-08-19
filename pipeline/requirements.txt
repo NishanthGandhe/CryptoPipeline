@@ -1,6 +1,7 @@
-statsmodels
 numpy
 pandas
+statsmodels
+pmdarima
 psycopg[binary]
 python-dotenv
 requests

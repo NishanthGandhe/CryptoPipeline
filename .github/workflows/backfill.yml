@@ -16,7 +16,7 @@ jobs:
       DB_USER: ${{ secrets.DB_USER }}
       DB_PASS: ${{ secrets.DB_PASS }}
       DB_PORT: ${{ secrets.DB_PORT }}
-      SYMBOLS: BTC-USD,ETH-USD
+      SYMBOLS: BTC-USD, ETH-USD, XRP-USD, LTC-USD, BCH-USD, LINK-USD, ADA-USD, XLM-USD, SOL-USD, DOT-USD, MATIC-USD, DOGE-USD, AVAX-USD, TRX-USD, ATOM-USD, ETC-USD, ALGO-USD, XMR-USD, ICP-USD, NEAR-USD, FIL-USD, APT-USD, HBAR-USD, UNI-USD, AAVE-USD, MKR-USD, SNX-USD, INJ-USD, STX-USD, GRT-USD
       BACKFILL_DAYS: ${{ github.event.inputs.days }}
     steps:
       - uses: actions/checkout@v4
