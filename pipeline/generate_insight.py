@@ -97,7 +97,7 @@ def safe_conf_int_from_resid_log(pred_level, resid_log, z=1.96):
     return lo, hi
 
 def load_series(cur, symbol, min_rows=100):
-    # pull daily gold series
+    # Pull daily gold; ignore obvious nulls early
     cur.execute("""
         select ds, close
         from gold_daily_metrics
@@ -105,27 +105,38 @@ def load_series(cur, symbol, min_rows=100):
         order by ds
     """, (symbol,))
     rows = cur.fetchall()
-    if not rows or len(rows) < min_rows:
+    if not rows:
         return None
 
-    df = pd.DataFrame(rows, columns=["ds", "close"]).dropna()
+    df = pd.DataFrame(rows, columns=["ds", "close"])
 
-    # 🔧 ensure proper types
-    df["ds"] = pd.to_datetime(df["ds"], utc=False)          # date -> datetime64[ns]
+    # Coerce types & clean
+    df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df = (
+        df.dropna(subset=["ds", "close"])
+          .drop_duplicates(subset=["ds"], keep="last")
+          .sort_values("ds")
+    )
 
-    # 🔧 make a clean daily DateTimeIndex
-    df = df.dropna(subset=["close"]).sort_values("ds")
-    df = df[~df["ds"].duplicated(keep="last")]              # drop duplicate days if any
+    # If too few points after cleaning, skip symbol
+    if len(df) < min_rows:
+        return None
+
+    # Build a proper daily index and fill small gaps
     df = df.set_index("ds")
+    start = df.index.min()
+    end = df.index.max()
+    if pd.isna(start) or pd.isna(end):
+        # nothing usable
+        return None
 
-    # 🔧 reindex to a full daily range (fills gaps), then time-interpolate
-    full_idx = pd.date_range(df.index.min(), df.index.max(), freq="D")
+    full_idx = pd.date_range(start, end, freq="D")
     df = df.reindex(full_idx)
     df.index.name = "ds"
     df["close"] = df["close"].interpolate(method="time").ffill().bfill()
 
-    # optional rolling window
+    # Optional rolling window
     if TRAIN_WINDOW_DAYS > 0:
         cutoff = df.index.max() - pd.Timedelta(days=TRAIN_WINDOW_DAYS - 1)
         df = df[df.index >= cutoff]
@@ -468,88 +479,93 @@ def main():
     inserted = 0
     with get_conn() as conn, conn.cursor() as cur:
         for sym in symbols:
-            df = load_series(cur, sym, min_rows=100)
-            if df is None:
-                print(f"{sym}: not enough history; skipping.")
-                continue
+            try:
+                df = load_series(cur, sym, min_rows=100)
+                if df is None or df.empty:
+                    print(f"[{sym}] not enough or invalid daily history; skipping.")
+                    continue
 
-            cand, best = train_candidates(df)
-            last_ds = df.index[-1].date()
-            ds_next = last_ds + timedelta(days=1)
-            max_h = max(h for _, h in HORIZONS)
-            run_id = uuid.uuid4()
+                cand, best = train_candidates(df)
+                last_ds = df.index[-1].date()
+                ds_next = last_ds + timedelta(days=1)
+                max_h = max(h for _, h in HORIZONS)
+                run_id = uuid.uuid4()
 
-            # 1) training run
-            cur.execute("""
-                insert into model_training_runs
-                  (run_id, symbol, ds_next, ds_train_end, holdout_len, n_train,
-                   naive_mae, best_method, best_mae, vs_naive_improve)
-                values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (
-                run_id, sym, ds_next, last_ds, best["holdout_len"], best["n_train"],
-                best["naive_mae"], best["method"], best["holdout_mae"], best["vs_naive_improve"]
-            ))
-
-            # 2) candidates
-            for c in cand:
-                params = None
-                if c.get("type") == "hw":
-                    params = {"trend":"add","seasonal":"add","seasonal_periods":7, "log_space": LOG_SPACE}
-                elif c.get("type") == "sarimax":
-                    params = {"order":[1,1,1], "seasonal_order":[0,1,1,7], "log_space": LOG_SPACE}
-                elif c.get("type") == "arima":
-                    params = {"auto": True, "m":7, "log_space": LOG_SPACE}
-                elif c.get("type") == "prophet":
-                    params = {"weekly":True, "yearly":True, "interval":"95%", "log_space": LOG_SPACE}
-                elif c.get("type") == "lstm":
-                    params = {"lag": DEEP_LAG, "epochs": DEEP_EPOCHS}
+                # 1) training run
                 cur.execute("""
-                    insert into model_training_candidates (run_id, method, mae, params, notes)
-                    values (%s,%s,%s,%s,%s)
+                    insert into model_training_runs
+                      (run_id, symbol, ds_next, ds_train_end, holdout_len, n_train,
+                       naive_mae, best_method, best_mae, vs_naive_improve)
+                    values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                 """, (
-                    run_id, c["method"],
-                    None if not math.isfinite(c.get("mae", math.inf)) else float(c["mae"]),
-                    json.dumps(params) if params is not None else None,
-                    c.get("notes")
+                    run_id, sym, ds_next, last_ds, best["holdout_len"], best["n_train"],
+                    best["naive_mae"], best["method"], best["holdout_mae"], best["vs_naive_improve"]
                 ))
 
-            # 3) forecasts (multi-horizon, upsert)
-            pred, lo95, hi95 = multi_horizon_forecast(best, max_h)
-            for label, h in HORIZONS:
-                tgt = last_ds + timedelta(days=h)
-                fc = float(pred[h-1])
+                # 2) candidates
+                for c in cand:
+                    params = None
+                    if c.get("type") == "hw":
+                        params = {"trend":"add","seasonal":"add","seasonal_periods":7, "log_space": LOG_SPACE}
+                    elif c.get("type") == "sarimax":
+                        params = {"order":[1,1,1], "seasonal_order":[0,1,1,7], "log_space": LOG_SPACE}
+                    elif c.get("type") == "arima":
+                        params = {"auto": True, "m":7, "log_space": LOG_SPACE}
+                    elif c.get("type") == "prophet":
+                        params = {"weekly":True, "yearly":True, "interval":"95%", "log_space": LOG_SPACE}
+                    elif c.get("type") == "lstm":
+                        params = {"lag": DEEP_LAG, "epochs": DEEP_EPOCHS}
+                    cur.execute("""
+                        insert into model_training_candidates (run_id, method, mae, params, notes)
+                        values (%s,%s,%s,%s,%s)
+                    """, (
+                        run_id, c["method"],
+                        None if not math.isfinite(c.get("mae", math.inf)) else float(c["mae"]),
+                        json.dumps(params) if params is not None else None,
+                        c.get("notes")
+                    ))
+
+                # 3) forecasts
+                pred, lo95, hi95 = multi_horizon_forecast(best, max_h)
+                for label, h in HORIZONS:
+                    tgt = last_ds + timedelta(days=h)
+                    fc = float(pred[h-1])
+                    cur.execute("""
+                        insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
+                        values (%s,%s,%s,%s,%s)
+                        on conflict (run_id, ds) do update
+                          set forecast_close = excluded.forecast_close,
+                              forecast_method = excluded.forecast_method
+                    """, (run_id, sym, tgt, fc, best["method"]))
+
+                # 4) insight
+                def fmt(x): return f"${x:,.2f}"
+                one_d = float(pred[0]); one_w = float(pred[7-1]); one_m = float(pred[30-1])
+                headline = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
+                details_bits = []
+                if best.get("holdout_mae") is not None:
+                    details_bits.append(f"MAE={best['holdout_mae']:.2f}")
+                if best.get("holdout_mae_pct") is not None:
+                    details_bits.append(f"MAE%={best['holdout_mae_pct']:.4f}")
+                if best["vs_naive_improve"] is not None:
+                    details_bits.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
+                if not np.isnan(lo95[0]):
+                    details_bits.append(f"1d 95% CI [{fmt(lo95[0])}, {fmt(hi95[0])}]")
+                details_bits.append("Long-horizon forecasts are highly uncertain.")
+                details = "; ".join(details_bits)
+
                 cur.execute("""
-                    insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
-                    values (%s,%s,%s,%s,%s)
-                    on conflict (run_id, ds) do update
-                      set forecast_close = excluded.forecast_close,
-                          forecast_method = excluded.forecast_method
-                """, (run_id, sym, tgt, fc, best["method"]))
+                    insert into insights (run_id, symbol, period, headline, details)
+                    values (%s, %s, 'daily', %s, %s)
+                """, (run_id, sym, headline, details))
 
-            # 4) human-friendly insight
-            def fmt(x): return f"${x:,.2f}"
-            one_d = float(pred[0]); one_w = float(pred[7-1]); one_m = float(pred[30-1])
-            headline = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
-            details_bits = []
-            if best.get("holdout_mae") is not None:
-                details_bits.append(f"MAE={best['holdout_mae']:.2f}")
-            if best.get("holdout_mae_pct") is not None:
-                details_bits.append(f"MAE%={best['holdout_mae_pct']:.4f}")
-            if best["vs_naive_improve"] is not None:
-                details_bits.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
-            # CI for 1d if we have it
-            if not np.isnan(lo95[0]):
-                details_bits.append(f"1d 95% CI [{fmt(lo95[0])}, {fmt(hi95[0])}]")
-            details_bits.append("Long-horizon forecasts are highly uncertain.")
-            details = "; ".join(details_bits)
+                inserted += 1
+                print(f"[{sym}] {best['method']} | run_id={run_id} | wrote {len(HORIZONS)} horizons")
 
-            cur.execute("""
-                insert into insights (run_id, symbol, period, headline, details)
-                values (%s, %s, 'daily', %s, %s)
-            """, (run_id, sym, headline, details))
-
-            inserted += 1
-            print(f"[{sym}] {best['method']} | run_id={run_id} | wrote {len(HORIZONS)} horizons")
+            except Exception as e:
+                # keep the pipeline moving
+                print(f"[{sym}] generate_insight error: {e!r}; skipping.")
+                continue
 
         print(f"Inserted {inserted} runs")
 
