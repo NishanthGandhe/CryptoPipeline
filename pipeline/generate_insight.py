@@ -1,5 +1,5 @@
 import os, math, warnings, uuid, json
-from datetime import timedelta
+from datetime import timedelta, date
 import numpy as np
 import pandas as pd
 import psycopg
@@ -10,6 +10,17 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 
 warnings.filterwarnings("ignore")
 load_dotenv()
+
+HORIZONS = [
+    ("1d", 1),
+    ("1w", 7),
+    ("1m", 30),
+    ("3m", 90),
+    ("6m", 180),
+    ("1y", 365),
+    ("5y", 1825),
+    ("10y", 3650),
+]
 
 # ---------- DB utils ----------
 def get_conn():
@@ -27,7 +38,6 @@ def get_symbols():
     raw = os.getenv("SYMBOLS", "BTC-USD")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
-# ---------- helpers ----------
 def mae(y_true, y_pred):
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
@@ -53,11 +63,6 @@ def load_series(cur, symbol, min_rows=50):
     return df
 
 def train_candidates(df):
-    """
-    Try multiple models; return:
-      candidates: list of dict(method, mae, params, notes, model_obj or preds)
-      best: dict with chosen forecast + intervals + metrics
-    """
     y = df["close"].astype(float)
     n = len(y)
     holdout = max(14, n // 10, 7)
@@ -66,9 +71,10 @@ def train_candidates(df):
         return [], {
             "method": "naive_close",
             "forecast": last,
-            "lo80": None, "hi80": None, "lo95": None, "hi95": None,
             "holdout_mae": None, "vs_naive_improve": 0.0,
-            "holdout_len": holdout, "n_train": n - holdout, "naive_mae": None
+            "holdout_len": holdout, "n_train": n - holdout,
+            "naive_mae": None,
+            "best_model": None, "best_type": "naive"
         }
 
     y_train = y.iloc[:-holdout]
@@ -76,18 +82,12 @@ def train_candidates(df):
 
     cand = []
 
-    # 1) Naive
+    # Naive
     naive_pred = np.repeat(y_train.iloc[-1], holdout)
     naive_mae = mae(y_test, naive_pred)
-    cand.append({
-        "method": "naive_close",
-        "mae": naive_mae,
-        "params": None,
-        "notes": None,
-        "pred": naive_pred
-    })
+    cand.append({"method":"naive_close","mae":naive_mae,"type":"naive"})
 
-    # 2) Holt-Winters (trend+weekly seasonality)
+    # Holt-Winters
     try:
         hw = ExponentialSmoothing(
             y_train, trend="add", seasonal="add", seasonal_periods=7,
@@ -95,17 +95,11 @@ def train_candidates(df):
         ).fit(optimized=True, use_brute=True)
         hw_pred = hw.forecast(holdout)
         hw_mae = mae(y_test, hw_pred)
-        cand.append({
-            "method": "holtwinters_add_add_7",
-            "mae": hw_mae,
-            "params": {"trend":"add","seasonal":"add","seasonal_periods":7},
-            "notes": None,
-            "model": hw
-        })
+        cand.append({"method":"holtwinters_add_add_7","mae":hw_mae,"type":"hw","model":hw})
     except Exception as e:
-        cand.append({"method":"holtwinters_failed","mae":math.inf,"params":None,"notes":str(e)})
+        cand.append({"method":"holtwinters_failed","mae":math.inf,"type":"hw_failed","notes":str(e)})
 
-    # 3) SARIMAX (light weekly seasonality)
+    # SARIMAX
     try:
         sar = SARIMAX(
             y_train, order=(1,1,1),
@@ -114,59 +108,72 @@ def train_candidates(df):
         ).fit(disp=False)
         sar_pred = sar.get_forecast(steps=holdout).predicted_mean
         sar_mae = mae(y_test, sar_pred)
-        cand.append({
-            "method":"sarimax_111_0117",
-            "mae": sar_mae,
-            "params":{"order":[1,1,1],"seasonal_order":[0,1,1,7]},
-            "notes": None,
-            "model": sar
-        })
+        cand.append({"method":"sarimax_111_0117","mae":sar_mae,"type":"sarimax","model":sar})
     except Exception as e:
-        cand.append({"method":"sarimax_failed","mae":math.inf,"params":None,"notes":str(e)})
+        cand.append({"method":"sarimax_failed","mae":math.inf,"type":"sar_failed","notes":str(e)})
 
-    # choose best finite MAE
     finite = [c for c in cand if math.isfinite(c["mae"])]
     finite.sort(key=lambda c: c["mae"])
     best = finite[0] if finite else cand[0]
 
-    # 1-step forecast + intervals
-    if best["method"].startswith("holtwinters") and "model" in best:
+    # One-step for the simple headline
+    if best["type"] == "hw":
         m = best["model"]
-        fc = float(m.forecast(1).iloc[0])
-        resid = y_train - m.fittedvalues.reindex_like(y_train).fillna(method="bfill")
-        lo95, hi95 = safe_conf_int_from_resid(fc, resid, 1.96)
-        lo80, hi80 = safe_conf_int_from_resid(fc, resid, 1.28)
-    elif best["method"].startswith("sarimax") and "model" in best:
+        one_fc = float(m.forecast(1).iloc[0])
+    elif best["type"] == "sarimax":
         m = best["model"]
-        gf = m.get_forecast(steps=1)
-        fc = float(gf.predicted_mean.iloc[0])
-        try:
-            ci95 = gf.conf_int(alpha=0.05)
-            lo95, hi95 = float(ci95.iloc[0,0]), float(ci95.iloc[0,1])
-        except Exception:
-            resid = y_train - m.fittedvalues
-            lo95, hi95 = safe_conf_int_from_resid(fc, resid, 1.96)
-        lo80, hi80 = safe_conf_int_from_resid(fc, (y_train - m.fittedvalues), 1.28)
+        one_fc = float(m.get_forecast(steps=1).predicted_mean.iloc[0])
     else:
-        fc = float(y.iloc[-1])
-        lo80 = hi80 = lo95 = hi95 = None
+        one_fc = float(y.iloc[-1])
 
     improve = 0.0
     base = naive_mae if math.isfinite(naive_mae) else None
     if base and math.isfinite(best["mae"]):
         improve = (base - best["mae"]) / base
 
-    best_out = {
+    return cand, {
         "method": best["method"],
-        "forecast": fc,
-        "lo80": lo80, "hi80": hi80, "lo95": lo95, "hi95": hi95,
+        "forecast": one_fc,
         "holdout_mae": best["mae"] if math.isfinite(best["mae"]) else None,
         "vs_naive_improve": improve,
         "holdout_len": holdout,
         "n_train": len(y_train),
-        "naive_mae": base
+        "naive_mae": base,
+        "best_model": best.get("model"),
+        "best_type": best["type"],
+        "y_train": y_train,
+        "y_full": y,
     }
-    return cand, best_out
+
+def multi_horizon_forecast(best, max_h):
+    """Return (pred[1..max_h], lo95, hi95) lists using the chosen model."""
+    btype = best["best_type"]
+    y_train = best["y_train"]
+    if btype == "sarimax" and best["best_model"] is not None:
+        m = best["best_model"]
+        gf = m.get_forecast(steps=max_h)
+        pred = gf.predicted_mean.to_numpy()
+        try:
+            ci95 = gf.conf_int(alpha=0.05).to_numpy()
+            lo = ci95[:,0]; hi = ci95[:,1]
+        except Exception:
+            resid = (y_train - m.fittedvalues).to_numpy()
+            lo = pred - 1.96*np.std(resid)
+            hi = pred + 1.96*np.std(resid)
+        return pred, lo, hi
+    elif btype == "hw" and best["best_model"] is not None:
+        m = best["best_model"]
+        pred = m.forecast(max_h).to_numpy()
+        resid = (y_train - m.fittedvalues.reindex_like(y_train).fillna(method="bfill")).to_numpy()
+        sd = np.std(resid) if len(resid) else 0.0
+        lo = pred - 1.96*sd
+        hi = pred + 1.96*sd
+        return pred, lo, hi
+    else:
+        # naive: flat line
+        last = float(best["y_full"].iloc[-1])
+        pred = np.repeat(last, max_h)
+        return pred, np.full(max_h, np.nan), np.full(max_h, np.nan)
 
 def main():
     symbols = get_symbols()
@@ -181,8 +188,9 @@ def main():
             cand, best = train_candidates(df)
             last_ds = df.index[-1].date()
             ds_next = last_ds + timedelta(days=1)
+            max_h = max(h for _,h in HORIZONS)
 
-            # Create a shared run_id so training, forecast, and insight are linked
+            # fresh run_id to link everything
             run_id = uuid.uuid4()
 
             # 1) Log training run
@@ -196,12 +204,14 @@ def main():
                 best["naive_mae"], best["method"], best["holdout_mae"], best["vs_naive_improve"]
             ))
 
-            # 2) Log all candidates
+            # 2) Log candidates
             for c in cand:
-                params = c.get("params")
-                # Make sure params is JSON serializable
-                if params is not None and not isinstance(params, (dict, list)):
-                    params = {"value": str(params)}
+                params = None
+                if c.get("method","").startswith(("holtwinters","sarimax")):
+                    if c.get("method","").startswith("holtwinters"):
+                        params = {"trend":"add","seasonal":"add","seasonal_periods":7}
+                    if c.get("method","").startswith("sarimax"):
+                        params = {"order":[1,1,1],"seasonal_order":[0,1,1,7]}
                 cur.execute("""
                     insert into model_training_candidates (run_id, method, mae, params, notes)
                     values (%s,%s,%s,%s,%s)
@@ -212,27 +222,47 @@ def main():
                     c.get("notes")
                 ))
 
-            # 3) Store forecast + insight (use same run_id for traceability)
-            cur.execute("""
-                insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
-                values (%s, %s, %s, %s, %s)
-            """, (run_id, sym, ds_next, float(best["forecast"]), best["method"]))
+            # 3) Forecast multiple horizons with the chosen model
+            pred, lo95, hi95 = multi_horizon_forecast(best, max_h)
 
-            detail_parts = []
-            if best["holdout_mae"] is not None: detail_parts.append(f"holdout MAE={best['holdout_mae']:.2f}")
-            if best["vs_naive_improve"] is not None: detail_parts.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
-            if best["lo95"] is not None: detail_parts.append(f"95% CI [{best['lo95']:.2f}, {best['hi95']:.2f}]")
-            details = "; ".join(detail_parts) if detail_parts else "No backtest metrics."
-            headline = f"{sym} {best['method']} forecast {best['forecast']:.2f} for {ds_next.isoformat()}"
+            # Insert a row per horizon (just like the 1-day we did before)
+            for label, h in HORIZONS:
+                tgt = last_ds + timedelta(days=h)
+                fc = float(pred[h-1])  # 1-indexed horizons
+                cur.execute("""
+                    insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
+                    values (%s, %s, %s, %s, %s)
+                """, (run_id, sym, tgt, fc, best["method"]))
+
+            # 4) Human-friendly insight text (short & simple)
+            # Show the three most useful horizons up front
+            def fmt(x): return f"${x:,.2f}"
+            one_d = float(pred[0])
+            one_w = float(pred[7-1])
+            one_m = float(pred[30-1])
+            head = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
+
+            details_bits = []
+            if best["holdout_mae"] is not None:
+                details_bits.append(f"MAE={best['holdout_mae']:.2f}")
+            if best["vs_naive_improve"] is not None:
+                details_bits.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
+            # 95% CI for the 1-day point if available
+            if not np.isnan(lo95[0]):
+                details_bits.append(f"1d 95% CI [{fmt(lo95[0])}, {fmt(hi95[0])}]")
+            details_bits.append("Long-horizon forecasts have high uncertainty.")
+
+            details = "; ".join(details_bits)
 
             cur.execute("""
                 insert into insights (run_id, symbol, period, headline, details)
                 values (%s, %s, 'daily', %s, %s)
-            """, (run_id, sym, headline, details))
+            """, (run_id, sym, head, details))
 
             inserted += 1
+            print(f"[{sym}] wrote forecasts for {len(HORIZONS)} horizons with run_id={run_id}")
 
-        print(f"Inserted {inserted} model_forecasts + insights + training logs")
+        print(f"Inserted {inserted} runs with multi-horizon forecasts")
 
 if __name__ == "__main__":
     main()
