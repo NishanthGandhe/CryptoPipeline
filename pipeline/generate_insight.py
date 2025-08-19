@@ -188,12 +188,12 @@ def main():
             cand, best = train_candidates(df)
             last_ds = df.index[-1].date()
             ds_next = last_ds + timedelta(days=1)
-            max_h = max(h for _,h in HORIZONS)
+            max_h = max(h for _, h in HORIZONS)
 
-            # fresh run_id to link everything
+            # Fresh run_id that we control
             run_id = uuid.uuid4()
 
-            # 1) Log training run
+            # 1) Log training run FIRST
             cur.execute("""
                 insert into model_training_runs
                   (run_id, symbol, ds_next, ds_train_end, holdout_len, n_train,
@@ -204,14 +204,17 @@ def main():
                 best["naive_mae"], best["method"], best["holdout_mae"], best["vs_naive_improve"]
             ))
 
-            # 2) Log candidates
+            # Safety check: ensure the FK target exists before forecasts
+            cur.execute("select 1 from model_training_runs where run_id = %s", (run_id,))
+            assert cur.fetchone(), "training run missing just after insert?!"
+
+            # 2) Log candidates (optional but useful)
             for c in cand:
                 params = None
-                if c.get("method","").startswith(("holtwinters","sarimax")):
-                    if c.get("method","").startswith("holtwinters"):
-                        params = {"trend":"add","seasonal":"add","seasonal_periods":7}
-                    if c.get("method","").startswith("sarimax"):
-                        params = {"order":[1,1,1],"seasonal_order":[0,1,1,7]}
+                if c.get("method","").startswith("holtwinters"):
+                    params = {"trend":"add","seasonal":"add","seasonal_periods":7}
+                elif c.get("method","").startswith("sarimax"):
+                    params = {"order":[1,1,1], "seasonal_order":[0,1,1,7]}
                 cur.execute("""
                     insert into model_training_candidates (run_id, method, mae, params, notes)
                     values (%s,%s,%s,%s,%s)
@@ -225,44 +228,42 @@ def main():
             # 3) Forecast multiple horizons with the chosen model
             pred, lo95, hi95 = multi_horizon_forecast(best, max_h)
 
-            # Insert a row per horizon (just like the 1-day we did before)
+            # UPSERT each horizon so retries are safe
             for label, h in HORIZONS:
                 tgt = last_ds + timedelta(days=h)
-                fc = float(pred[h-1])  # 1-indexed horizons
+                fc = float(pred[h-1])  # horizons are 1-indexed
                 cur.execute("""
                     insert into model_forecasts (run_id, symbol, ds, forecast_close, forecast_method)
                     values (%s, %s, %s, %s, %s)
+                    on conflict (run_id, ds) do update
+                      set forecast_close = excluded.forecast_close,
+                          forecast_method = excluded.forecast_method
                 """, (run_id, sym, tgt, fc, best["method"]))
 
-            # 4) Human-friendly insight text (short & simple)
-            # Show the three most useful horizons up front
+            # 4) Human-friendly insight (short)
             def fmt(x): return f"${x:,.2f}"
-            one_d = float(pred[0])
-            one_w = float(pred[7-1])
-            one_m = float(pred[30-1])
-            head = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
+            one_d = float(pred[0]); one_w = float(pred[7-1]); one_m = float(pred[30-1])
+            headline = f"{sym} {best['method']} forecasts — 1d: {fmt(one_d)}, 1w: {fmt(one_w)}, 1m: {fmt(one_m)}"
 
             details_bits = []
             if best["holdout_mae"] is not None:
                 details_bits.append(f"MAE={best['holdout_mae']:.2f}")
             if best["vs_naive_improve"] is not None:
                 details_bits.append(f"vs naive: {best['vs_naive_improve']:+.0%}")
-            # 95% CI for the 1-day point if available
             if not np.isnan(lo95[0]):
                 details_bits.append(f"1d 95% CI [{fmt(lo95[0])}, {fmt(hi95[0])}]")
             details_bits.append("Long-horizon forecasts have high uncertainty.")
-
             details = "; ".join(details_bits)
 
             cur.execute("""
                 insert into insights (run_id, symbol, period, headline, details)
                 values (%s, %s, 'daily', %s, %s)
-            """, (run_id, sym, head, details))
+            """, (run_id, sym, headline, details))
 
             inserted += 1
-            print(f"[{sym}] wrote forecasts for {len(HORIZONS)} horizons with run_id={run_id}")
+            print(f"[{sym}] run_id={run_id} wrote {len(HORIZONS)} horizons + insight")
 
-        print(f"Inserted {inserted} runs with multi-horizon forecasts")
+        print(f"Inserted {inserted} runs")
 
 if __name__ == "__main__":
     main()
