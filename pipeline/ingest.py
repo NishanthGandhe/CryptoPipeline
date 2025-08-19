@@ -1,4 +1,4 @@
-import os, json,time
+import os, json, time
 from datetime import datetime, timezone
 import requests
 from requests import HTTPError
@@ -16,7 +16,8 @@ def get_conn():
     missing = [k for k,v in {"DB_HOST":host,"DB_NAME":db,"DB_USER":user,"DB_PASS":pwd}.items() if not v]
     if missing:
         raise RuntimeError(f"Missing DB envs: {missing}")
-    return psycopg.connect(host=host, dbname=db, user=user, password=pwd, port=port)
+    # If your Supabase requires SSL, uncomment sslmode="require"
+    return psycopg.connect(host=host, dbname=db, user=user, password=pwd, port=port)  # , sslmode="require"
 
 def get_symbols():
     raw = os.getenv("SYMBOLS", "BTC-USD")
@@ -25,10 +26,11 @@ def get_symbols():
 # --- Providers (no API key) ---
 HEADERS = {"User-Agent": "cryptopipe/0.1 (+https://github.com/you/cryptopipe)"}
 STEP_SEC = 3600
-BITSTAMP_MAX = 1000     
-KRAKEN_MAX = 720         
+BITSTAMP_MAX = 1000
+KRAKEN_MAX = 720
 
 def bitstamp_pair(symbol_std: str) -> str:
+    # "BTC-USD" -> "btcusd"
     return symbol_std.replace("-", "").lower()
 
 def kraken_pair(symbol_std: str) -> str:
@@ -36,11 +38,23 @@ def kraken_pair(symbol_std: str) -> str:
     base = {"BTC": "XBT"}.get(base.upper(), base.upper())
     return f"{base}{quote.upper()}"
 
-def fetch_bitstamp_page(symbol_std: str, end_ts: int, limit: int = BITSTAMP_MAX):
+def fetch_bitstamp_page(
+    symbol_code: str,  # e.g. "btcusd"
+    end_ts: int,
+    limit: int = BITSTAMP_MAX,
+    session: requests.Session | None = None,
+):
+    """
+    Returns:
+      - list[dict] with keys: openTime, closeTime, open, high, low, close, volume
+      - [] if no more data
+      - None if 404 (pair not listed)
+    Raises HTTPError for other non-2xx.
+    """
     s = session or requests.Session()
-    url = f"https://www.bitstamp.net/api/v2/ohlc/{symbol_std}/"
+    url = f"https://www.bitstamp.net/api/v2/ohlc/{symbol_code}/"
     params = {
-        "step": 3600,
+        "step": STEP_SEC,
         "limit": limit,
         "end": end_ts,
         "exclude_current_candle": "true",
@@ -48,17 +62,25 @@ def fetch_bitstamp_page(symbol_std: str, end_ts: int, limit: int = BITSTAMP_MAX)
     r = s.get(url, params=params, timeout=20)
     if r.status_code == 404:
         return None
-    try:
-        r.raise_for_status()
-    except HTTPError:
-        raise  # let caller handle retries / abort
-
+    r.raise_for_status()
     j = r.json()
-    data = (j or {}).get("data", {})
-    return data.get("ohlc", []) or []
+    ohlc = (j or {}).get("data", {}).get("ohlc", []) or []
+    out = []
+    for c in ohlc:
+        ts = int(c["timestamp"])
+        out.append({
+            "openTime": ts * 1000,
+            "closeTime": (ts + STEP_SEC) * 1000,
+            "open": c["open"],
+            "high": c["high"],
+            "low":  c["low"],
+            "close": c["close"],
+            "volume": c.get("volume", "0"),
+        })
+    return out
 
 def backfill_bitstamp(symbol: str, backfill_days: int, conn):
-    symbol_std = symbol.replace("-", "").lower()  # "BTC-USD" -> "btcusd"
+    code = bitstamp_pair(symbol)
     now_sec = int(time.time())
     earliest_needed = now_sec - backfill_days * 86400
     end = now_sec
@@ -71,7 +93,7 @@ def backfill_bitstamp(symbol: str, backfill_days: int, conn):
 
     while True:
         try:
-            page = fetch_bitstamp_page(symbol_std, end_ts=end, limit=BITSTAMP_MAX, session=s)
+            page = fetch_bitstamp_page(code, end_ts=end, limit=BITSTAMP_MAX, session=s)
         except HTTPError as e:
             status = getattr(e.response, "status_code", None)
             if status in (429, 500, 502, 503, 504) and retries < 5:
@@ -82,44 +104,20 @@ def backfill_bitstamp(symbol: str, backfill_days: int, conn):
                 continue
             print(f"[{symbol}] HTTP error: {e}. Skipping the rest of this symbol.")
             return
-        retries = 0  # reset after a successful call
+        retries = 0
 
         if page is None:
-            print(f"[{symbol}] Bitstamp pair '{symbol_std}' not found (404). Skipping.")
+            print(f"[{symbol}] Bitstamp pair '{code}' not found (404). Skipping.")
             return
-
         if not page:
-            # no more data
             break
 
-        # transform + insert
-        rows = []
-        earliest_in_page = None
-        for c in page:
-            ts = int(c["timestamp"])
-            if earliest_in_page is None or ts < earliest_in_page:
-                earliest_in_page = ts
-            # Build your bronze row payload (same as you already do)
-            rows.append((
-                symbol,  # symbol text e.g. "MATIC-USD"
-                json.dumps({
-                    "openTime": ts * 1000,
-                    "open": c["open"],
-                    "high": c["high"],
-                    "low": c["low"],
-                    "close": c["close"],
-                    "volume": c.get("volume", "0")
-                })
-            ))
+        # normalize to bronze rows and insert
+        rows = normalize_to_bronze_rows(symbol, page)
+        inserted = upsert_bronze(conn, rows)
+        total += inserted
 
-        with conn.cursor() as cur:
-            cur.executemany(
-                "insert into bronze_ticks (symbol, payload) values (%s, %s) on conflict do nothing",
-                rows
-            )
-        conn.commit()
-        total += len(rows)
-
+        earliest_in_page = min(int(p["openTime"] // 1000) for p in page)
         end = earliest_in_page - 1
         if earliest_in_page <= earliest_needed:
             break
@@ -128,9 +126,12 @@ def backfill_bitstamp(symbol: str, backfill_days: int, conn):
 
     print(f"[{symbol}] Backfill inserted (or deduped) {total} rows.")
 
-
-# ------------ Kraken fetch (kept as recent fallback only) ------------
+# ------------ Kraken fetch (fallback) ------------
 def fetch_kraken(symbol_std: str, limit: int = 300):
+    """
+    Returns payload-shaped rows like Bitstamp:
+    openTime, closeTime, open, high, low, close, volume
+    """
     url = "https://api.kraken.com/0/public/OHLC"
     pair = kraken_pair(symbol_std)
     r = requests.get(url, params={"pair": pair, "interval": 60}, headers=HEADERS, timeout=30)
@@ -143,9 +144,13 @@ def fetch_kraken(symbol_std: str, limit: int = 300):
     for k in arr:
         t = int(k[0])
         rows.append({
-            "o": str(k[1]), "h": str(k[2]), "l": str(k[3]), "c": str(k[4]), "v": str(k[6]),
             "openTime": t * 1000,
-            "closeTime": (t + STEP_SEC) * 1000
+            "closeTime": (t + STEP_SEC) * 1000,
+            "open": str(k[1]),
+            "high": str(k[2]),
+            "low":  str(k[3]),
+            "close": str(k[4]),
+            "volume": str(k[6]),
         })
     rows.sort(key=lambda p: p["openTime"])
     return rows
@@ -168,6 +173,7 @@ def upsert_bronze(conn, rows):
     """
     with conn.cursor() as cur:
         cur.executemany(sql, rows)
+    conn.commit()
     return len(rows)
 
 # ------------ Main orchestration ------------
@@ -180,12 +186,15 @@ def main():
         # 1) Optional backfill per symbol (Bitstamp only)
         if backfill_days > 0:
             for sym in symbols:
-                backfill_bitstamp(sym, backfill_days, conn)
+                try:
+                    backfill_bitstamp(sym, backfill_days, conn)
+                except Exception as e:
+                    print(f"[{sym}] Unhandled backfill error: {e!r}. Skipping.")
 
-        # 2) Always do a recent top-up (Bitstamp → Kraken fallback)
+        # 2) Recent top-up (Bitstamp → Kraken fallback)
         for sym in symbols:
             try:
-                page = fetch_bitstamp_page(sym, end_ts=int(time.time()), limit=300)
+                page = fetch_bitstamp_page(bitstamp_pair(sym), end_ts=int(time.time()), limit=300)
                 if page is None:
                     print(f"[{sym}] Bitstamp pair not found (404). Skipping this symbol.")
                     continue
@@ -195,24 +204,22 @@ def main():
                 if status == 404:
                     print(f"[{sym}] Bitstamp pair not found (404). Skipping this symbol.")
                     continue
-                # Non-404 HTTP errors: try Kraken as fallback
                 print(f"[{sym}] Bitstamp HTTP {status}; falling back to Kraken…")
                 page = fetch_kraken(sym, limit=300)
                 source = "Kraken"
             except Exception as e:
-                # Network/JSON/etc → try Kraken
                 print(f"[{sym}] Bitstamp unexpected error ({e!r}); falling back to Kraken…")
                 page = fetch_kraken(sym, limit=300)
                 source = "Kraken"
-            
+
             if not page:
                 print(f"[{sym}] No candles from {source}. Skipping.")
                 continue
 
-    print(f"[{sym}] {source} recent fetched {len(page)} candles.")
-    rows = normalize_to_bronze_rows(sym, page)
-    inserted = upsert_bronze(conn, rows)
-    print(f"[{sym}] inserted (or deduped) {inserted} rows.")
+            print(f"[{sym}] {source} recent fetched {len(page)} candles.")
+            rows = normalize_to_bronze_rows(sym, page)
+            inserted = upsert_bronze(conn, rows)
+            print(f"[{sym}] inserted (or deduped) {inserted} rows.")
 
     print("Ingest complete.")
 
