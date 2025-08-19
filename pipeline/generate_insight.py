@@ -81,17 +81,20 @@ def mae_pct(y_true, y_pred):
     denom = float(np.mean(np.abs(y_true))) or 1.0
     return mae(y_true, y_pred) / denom
 
-def safe_conf_int_from_resid_level(pred, resid, z=1.96):
-    sd = float(np.std(resid)) if len(resid) else 0.0
-    return (pred - z*sd, pred + z*sd)
+def safe_conf_int_from_resid_level(pred_level, resid, z=1.96):
+    pred = np.asarray(pred_level, dtype=float)
+    sd = float(np.std(np.asarray(resid, dtype=float))) if len(resid) else 0.0
+    lo = pred - z * sd
+    hi = pred + z * sd
+    return lo, hi
 
 def safe_conf_int_from_resid_log(pred_level, resid_log, z=1.96):
-    # If model fit on log(y): conf on log scale → exp back to level
-    sd = float(np.std(resid_log)) if len(resid_log) else 0.0
-    mu_log = math.log(max(pred_level, 1e-12))
-    lo = math.exp(mu_log - z*sd)
-    hi = math.exp(mu_log + z*sd)
-    return (lo, hi)
+    pred = np.asarray(pred_level, dtype=float)
+    mu_log = np.log(np.clip(pred, 1e-12, None))
+    sd = float(np.std(np.asarray(resid_log, dtype=float))) if len(resid_log) else 0.0
+    lo = np.exp(mu_log - z * sd)
+    hi = np.exp(mu_log + z * sd)
+    return lo, hi
 
 def load_series(cur, symbol, min_rows=100):
     cur.execute("""
