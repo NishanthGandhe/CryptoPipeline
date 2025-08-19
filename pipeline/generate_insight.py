@@ -27,6 +27,8 @@ try:
     import torch.nn as nn
     HAVE_TORCH = True
 except Exception:
+    torch = None
+    nn = None
     HAVE_TORCH = False
 
 warnings.filterwarnings("ignore")
@@ -111,50 +113,55 @@ def load_series(cur, symbol, min_rows=100):
     return df
 
 # ---------- optional: tiny LSTM for short-horizon ----------
-class LSTMReg(nn.Module):
-    def __init__(self, input_size=1, hidden=32, layers=1):
-        super().__init__()
-        self.lstm = nn.LSTM(input_size, hidden, num_layers=layers, batch_first=True)
-        self.head = nn.Linear(hidden, 1)
-    def forward(self, x):
-        out, _ = self.lstm(x)
-        return self.head(out[:, -1, :])
+if HAVE_TORCH:
+    class LSTMReg(nn.Module):
+        def __init__(self, input_size=1, hidden=32, layers=1):
+            super().__init__()
+            self.lstm = nn.LSTM(input_size, hidden, num_layers=layers, batch_first=True)
+            self.head = nn.Linear(hidden, 1)
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.head(out[:, -1, :])
 
-def fit_lstm(series, lag=30, epochs=40):
-    # series: np.array shape (n,)
-    device = torch.device("cpu")
-    x, y = [], []
-    for i in range(len(series) - lag):
-        x.append(series[i:i+lag])
-        y.append(series[i+lag])
-    x = np.array(x, dtype=np.float32)[:, :, None]
-    y = np.array(y, dtype=np.float32)[:, None]
-    x_t = torch.from_numpy(x).to(device)
-    y_t = torch.from_numpy(y).to(device)
-    model = LSTMReg()
-    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
-    lossf = nn.L1Loss()
-    model.train()
-    for _ in range(epochs):
-        opt.zero_grad()
-        pred = model(x_t)
-        loss = lossf(pred, y_t)
-        loss.backward()
-        opt.step()
-    model.eval()
-    return model
+    def fit_lstm(series, lag=30, epochs=40):
+        series = np.asarray(series, dtype=np.float32)
+        x, y = [], []
+        for i in range(len(series) - lag):
+            x.append(series[i:i+lag])
+            y.append(series[i+lag])
+        x = np.array(x, dtype=np.float32)[:, :, None]
+        y = np.array(y, dtype=np.float32)[:, None]
+        x_t = torch.from_numpy(x)
+        y_t = torch.from_numpy(y)
+        model = LSTMReg()
+        opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+        lossf = torch.nn.L1Loss()
+        model.train()
+        for _ in range(epochs):
+            opt.zero_grad()
+            pred = model(x_t)
+            loss = lossf(pred, y_t)
+            loss.backward()
+            opt.step()
+        model.eval()
+        return model
 
-def lstm_forecast(model, last_window, steps):
-    # last_window: np.array length=lag
-    out = []
-    cur = last_window.astype(np.float32).copy()
-    for _ in range(steps):
-        x = torch.from_numpy(cur[None, :, None])
-        with torch.no_grad():
-            yhat = model(x).numpy().ravel()[0]
-        out.append(float(yhat))
-        cur = np.roll(cur, -1); cur[-1] = yhat
-    return np.array(out, dtype=float)
+    def lstm_forecast(model, last_window, steps):
+        out = []
+        cur = np.asarray(last_window, dtype=np.float32).copy()
+        for _ in range(steps):
+            x = torch.from_numpy(cur[None, :, None])
+            with torch.no_grad():
+                yhat = model(x).numpy().ravel()[0]
+            out.append(float(yhat))
+            cur = np.roll(cur, -1); cur[-1] = yhat
+        return np.array(out, dtype=float)
+else:
+    # Safe stubs so accidental calls give a clear error
+    def fit_lstm(*args, **kwargs):
+        raise RuntimeError("USE_DEEP=1 but PyTorch is not installed on this runner.")
+    def lstm_forecast(*args, **kwargs):
+        raise RuntimeError("USE_DEEP=1 but PyTorch is not installed on this runner.")
 
 # ---------- training + selection ----------
 def train_candidates(df):

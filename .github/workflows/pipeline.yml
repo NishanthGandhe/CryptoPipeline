@@ -19,6 +19,10 @@ jobs:
       DB_PASS:     ${{ secrets.DB_PASS }}
       DB_PORT:     ${{ secrets.DB_PORT }}
       SYMBOLS: BTC-USD, ETH-USD, XRP-USD, LTC-USD, BCH-USD, LINK-USD, ADA-USD, XLM-USD, SOL-USD, DOT-USD, MATIC-USD, DOGE-USD, AVAX-USD, TRX-USD, ATOM-USD, ETC-USD, ALGO-USD, XMR-USD, ICP-USD, NEAR-USD, FIL-USD, APT-USD, HBAR-USD, UNI-USD, AAVE-USD, MKR-USD, SNX-USD, INJ-USD, STX-USD, GRT-USD
+      TRAIN_WINDOW_DAYS: "0"           
+      USE_DEEP: "0"                    
+      USE_PROPHET: "0"                 
+      LOG_SPACE: "1"                   
 
     steps:
       - uses: actions/checkout@v4
