@@ -6,7 +6,8 @@ import fs from 'fs';
 
 const execAsync = promisify(exec);
 
-export async function POST(request: NextRequest) {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function POST(_request: NextRequest) {
   try {
     console.log('Starting data refresh pipeline...');
     
@@ -78,18 +79,23 @@ export async function POST(request: NextRequest) {
       }
     });
     
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Pipeline execution failed:', error);
     
     // More detailed error information
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     const errorDetails = {
-      message: error.message,
-      code: error.code,
-      killed: error.killed,
-      signal: error.signal,
-      cmd: error.cmd,
-      stdout: error.stdout?.slice(-1000) || null,
-      stderr: error.stderr?.slice(-1000) || null
+      message: errorMessage,
+      code: error && typeof error === 'object' && 'code' in error ? (error as { code: unknown }).code : undefined,
+      killed: error && typeof error === 'object' && 'killed' in error ? (error as { killed: unknown }).killed : undefined,
+      signal: error && typeof error === 'object' && 'signal' in error ? (error as { signal: unknown }).signal : undefined,
+      cmd: error && typeof error === 'object' && 'cmd' in error ? (error as { cmd: unknown }).cmd : undefined,
+      stdout: error && typeof error === 'object' && 'stdout' in error ? 
+        typeof (error as { stdout: unknown }).stdout === 'string' ? 
+        ((error as { stdout: string }).stdout).slice(-1000) : null : null,
+      stderr: error && typeof error === 'object' && 'stderr' in error ? 
+        typeof (error as { stderr: unknown }).stderr === 'string' ? 
+        ((error as { stderr: string }).stderr).slice(-1000) : null : null
     };
     
     return NextResponse.json({ 

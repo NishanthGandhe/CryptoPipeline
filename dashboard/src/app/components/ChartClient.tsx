@@ -8,7 +8,7 @@ type ChartClientProps = {
 };
 
 // Custom Tooltip for better formatting
-const CustomTooltip = ({ active, payload, label }: any) => {
+const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: PriceRow }>; label?: string }) => {
   if (active && payload && payload.length) {
     const dataPoint = payload[0].payload;
     return (

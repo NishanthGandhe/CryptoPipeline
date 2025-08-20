@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { supabase } from "@/lib/supabase";
-import { QUICK_HORIZONS, ALL_HORIZONS, daysToLabelFromBase } from "@/lib/constants";
-import { PriceRow, LatestRow, MultiForecastRow, SymbolRow, ProcessedForecast, ModelInfo } from "@/lib/types"; // (See types.ts below)
+import { ALL_HORIZONS, daysToLabelFromBase } from "@/lib/constants";
+import { PriceRow, LatestRow, MultiForecastRow, ProcessedForecast, ModelInfo } from "@/lib/types";
 
 // Centralized data fetching and processing hook
 export function useCryptoData(symbol: string) {
@@ -53,9 +53,10 @@ export function useCryptoData(symbol: string) {
       // After successful pipeline run, trigger data refetch
       setRefreshKey(prev => prev + 1);
       
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('Pipeline refresh failed:', error);
-      setError(`Data refresh failed: ${error.message}`);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+      setError(`Data refresh failed: ${errorMessage}`);
     } finally {
       setIsRefreshing(false);
     }
@@ -204,8 +205,9 @@ export function useCryptoData(symbol: string) {
           modelInfo,
         });
 
-      } catch (e: any) {
-        setError(e.message || "An unexpected error occurred.");
+      } catch (e: unknown) {
+        const errorMessage = e instanceof Error ? e.message : "An unexpected error occurred.";
+        setError(errorMessage);
       } finally {
         setLoading(false);
       }
