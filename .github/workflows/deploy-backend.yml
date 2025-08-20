@@ -18,24 +18,19 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install dependencies
+      - name: Test Python imports
         run: |
           cd pipeline
           pip install -r requirements.txt
+          python -c "import main; print('✅ FastAPI app ready')"
 
-      - name: Run tests (optional)
-        run: |
-          cd pipeline
-          python -c "import main; print('FastAPI app imports successfully')"
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
 
       - name: Deploy to Railway
-        uses: bsolutions/railway-deploy-action@v1.0.6
-        with:
-          railway-token: ${{ secrets.RAILWAY_TOKEN }}
-          service: ${{ secrets.RAILWAY_SERVICE }}
-          variables: |
-            DB_HOST=${{ secrets.DB_HOST }}
-            DB_NAME=${{ secrets.DB_NAME }}
-            DB_USER=${{ secrets.DB_USER }}
-            DB_PASS=${{ secrets.DB_PASS }}
-            DB_PORT=${{ secrets.DB_PORT }}
+        run: |
+          cd pipeline
+          railway login --token ${{ secrets.RAILWAY_TOKEN }}
+          railway up
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
