@@ -45,6 +45,9 @@ jobs:
 
       - name: Ingest bronze
         run: python pipeline/ingest.py
+    
+      - name: Ingest metrics
+        run: python pipeline/ingest_metrics.py
 
       - name: Run transforms (silver & gold)
         run: python pipeline/run_etl.py

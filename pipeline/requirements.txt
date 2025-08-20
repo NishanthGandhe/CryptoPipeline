@@ -5,3 +5,5 @@ pmdarima
 psycopg[binary]
 python-dotenv
 requests
+xgboost
+scikit-learn

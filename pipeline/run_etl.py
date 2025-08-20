@@ -1,4 +1,5 @@
-import os, psycopg
+import os
+import psycopg
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,16 +10,34 @@ port = os.getenv("DB_PORT")
 db = os.getenv("DB_NAME")
 
 def run_sql_file(conn, path):
-    with open(path, "r", encoding="utf-8") as f, conn.cursor() as cur:
-        cur.execute(f.read())
+    """
+    Reads a SQL file, splits it into individual statements,
+    ignores comments, and executes them one by one.
+    """
+    print(f"  Reading SQL from {path}...")
+    with open(path, "r", encoding="utf-8") as f:
+        sql_statements = f.read().split(';')
 
-def main():
+    with conn.cursor() as cur:
+        for i, statement in enumerate(sql_statements):
+            if statement.strip() and not statement.strip().startswith('--'):
+                try:
+                    print(f"    Executing statement {i+1}...")
+                    cur.execute(statement)
+                except Exception as e:
+                    print(f"      ERROR executing statement: {e}")
+                    raise e
+
+def main():    
     print("Connecting…")
-    with psycopg.connect(user=user, password=pwd, host=host, port=port, dbname=db) as conn:
-        print("Running transform.sql …")
+    conn_info = f"user={user} password={pwd} host={host} port={port} dbname={db}"
+    with psycopg.connect(conn_info, autocommit=True) as conn:
+        print("Running transform.sql…")
         run_sql_file(conn, "pipeline/transform.sql")
-        print("Running metrics.sql …")
+        
+        print("Running metrics.sql…")
         run_sql_file(conn, "pipeline/metrics.sql")
+        
     print("Done.")
 
 if __name__ == "__main__":

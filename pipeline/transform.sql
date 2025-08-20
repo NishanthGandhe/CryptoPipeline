@@ -1,14 +1,8 @@
--- pipeline/transform.sql
--- Idempotent: (re)defines views; no inserts into views.
-
--- Drop downstream views first to avoid dependency errors
 drop view if exists public.price_last_120d cascade;
 drop view if exists public.symbols cascade;
 drop view if exists public.latest_spot cascade;
 drop view if exists public.price_daily cascade;
 
--- Recreate SILVER (hourly) as a VIEW over bronze_ticks.
--- Handles both payload schemas: {"open","high","low","close","volume"} and {"o","h","l","c","v"}.
 create or replace view public.silver_prices as
 select
   symbol,
@@ -23,7 +17,6 @@ where source = 'crypto';
 
 grant select on public.silver_prices to anon, authenticated;
 
--- Daily close = last hourly bar per UTC day
 create or replace view public.price_daily as
 with marked as (
   select
@@ -44,37 +37,24 @@ where rn = 1;
 
 grant select on public.price_daily to anon, authenticated;
 
--- Gold metrics computed from price_daily
-create or replace view public.gold_daily_metrics as
-select
-  d.symbol,
-  d.ds,
-  d.close,
-  (d.close / lag(d.close) over (partition by d.symbol order by d.ds) - 1.0) as ret_1d,
-  avg(d.close) over (
-    partition by d.symbol
-    order by d.ds
-    rows between 6 preceding and current row
-  ) as ma_7,
-  case
-    when stddev_samp(d.close) over (
-      partition by d.symbol order by d.ds
-      rows between 29 preceding and current row
-    ) > 0
-    then (d.close - avg(d.close) over (
-            partition by d.symbol order by d.ds
-            rows between 29 preceding and current row
-         ))
-       / stddev_samp(d.close) over (
-            partition by d.symbol order by d.ds
-            rows between 29 preceding and current row
-         )
-  end as zscore_close
-from public.price_daily d;
+CREATE OR REPLACE VIEW public.gold_daily_metrics AS
+SELECT
+  pd.symbol,
+  pd.ds,
+  pd.close,
+
+  (pd.close / LAG(pd.close, 1) OVER (PARTITION BY pd.symbol ORDER BY pd.ds) - 1.0) AS ret_1d,
+  AVG(pd.close) OVER (PARTITION BY pd.symbol ORDER BY pd.ds ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) AS ma_7d,
+
+  bdm.trade_volume_usd,
+  bdm.total_supply
+
+FROM public.price_daily pd
+LEFT JOIN public.bronze_daily_metrics bdm
+ON pd.symbol = bdm.symbol AND pd.ds = bdm.ds;
 
 grant select on public.gold_daily_metrics to anon, authenticated;
 
--- Symbols to show in the UI (only those with enough data)
 create or replace view public.symbols as
 select symbol
 from public.gold_daily_metrics
@@ -84,7 +64,6 @@ having count(*) >= 60;
 
 grant select on public.symbols to anon, authenticated;
 
--- 120-day chart helper
 create or replace view public.price_last_120d as
 select
   symbol,
@@ -100,7 +79,6 @@ where ds >= (current_date - interval '120 days') and close is not null;
 
 grant select on public.price_last_120d to anon, authenticated;
 
--- Latest hourly close per symbol (for "Current price" tile)
 create or replace view public.latest_spot as
 select s.symbol, s.ts, s.close
 from public.silver_prices s

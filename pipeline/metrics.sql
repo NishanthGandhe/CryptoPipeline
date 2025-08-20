@@ -1,7 +1,3 @@
--- pipeline/metrics.sql
--- Read-only views for frontend.
-
--- Latest forecasts for each symbol from the most recent run
 create or replace view public.latest_forecasts_all as
 with lr as (
   select symbol, max(created_at) as created_at
@@ -16,7 +12,6 @@ order by f.symbol, f.ds;
 
 grant select on public.latest_forecasts_all to anon, authenticated;
 
--- Single-row "headline" per symbol: join the latest insight to the earliest horizon in that run
 create or replace view public.latest_forecast_insight as
 with li as (
   select symbol, max(created_at) as created_at
