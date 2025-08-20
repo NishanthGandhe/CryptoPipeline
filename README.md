@@ -18,7 +18,7 @@
 - **Model Transparency**: Dashboard shows which ML model is used and why for each crypto
 
 ### 🚀 **Production Cloud Deployment**
-- **Live Application**: [crypto-pipeline-hvkhdclec-nishanth-gandhes-projects-101d2421.vercel.app](https://crypto-pipeline-hvkhdclec-nishanth-gandhes-projects-101d2421.vercel.app/)
+- **Live Application**: [crypto-pipeline.vercel.app](https://crypto-pipeline.vercel.app/)
 - **Microservices Architecture**: Frontend (Vercel) + Backend API (Railway) + Database (Supabase)
 - **CI/CD Pipeline**: GitHub Actions for automated deployment
 - **Environment Management**: Secure configuration with cloud environment variables
