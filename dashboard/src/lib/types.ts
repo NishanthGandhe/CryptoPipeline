@@ -26,3 +26,10 @@ export type ProcessedForecast = {
   change: number | null;
   percentChange: number | null;
 }
+
+export type ModelInfo = {
+  method: string;
+  description: string;
+  features: string[];
+  accuracy: string;
+}
