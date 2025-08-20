@@ -16,11 +16,14 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.13'
+          python-version: '3.11'
 
       - name: Test Python imports
         run: |
           cd pipeline
+          # Install core dependencies first
+          pip install numpy scipy
+          # Install remaining dependencies
           pip install -r requirements.txt
           python -c "import main; print('✅ FastAPI app ready')"
 
