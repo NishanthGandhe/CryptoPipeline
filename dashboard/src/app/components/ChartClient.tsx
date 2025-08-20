@@ -7,7 +7,6 @@ type ChartClientProps = {
   data: PriceRow[];
 };
 
-// Custom Tooltip for better formatting
 const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<{ payload: PriceRow }>; label?: string }) => {
   if (active && payload && payload.length) {
     const dataPoint = payload[0].payload;
@@ -29,7 +28,6 @@ const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Array<
 };
 
 export default function ChartClient({ data }: ChartClientProps) {
-  // Formatter for the Y-axis (price)
   const formatYAxis = (tickItem: number) => {
     if (tickItem >= 1000) {
       return `$${(tickItem / 1000).toFixed(0)}k`;
@@ -37,9 +35,7 @@ export default function ChartClient({ data }: ChartClientProps) {
     return `$${tickItem}`;
   };
 
-  // Formatter for the X-axis (date)
   const formatXAxis = (tickItem: string) => {
-    // e.g., "2025-08-19" -> "Aug 19"
     return new Date(tickItem + "T00:00:00Z").toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
   };
   

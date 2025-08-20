@@ -10,10 +10,6 @@ port = os.getenv("DB_PORT")
 db = os.getenv("DB_NAME")
 
 def run_sql_file(conn, path):
-    """
-    Reads a SQL file, splits it into individual statements,
-    ignores comments, and executes them one by one.
-    """
     print(f"  Reading SQL from {path}...")
     with open(path, "r", encoding="utf-8") as f:
         sql_statements = f.read().split(';')

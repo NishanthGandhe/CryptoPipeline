@@ -12,7 +12,6 @@ type ForecastSliderProps = {
 export function ForecastSlider({ forecasts, currentPrice }: ForecastSliderProps) {
   const [selectedDay, setSelectedDay] = useState(1);
   
-  // Filter out forecasts with null prices and get the one for selected day
   const validForecasts = forecasts.filter(f => f.forecastPrice !== null);
   const selectedForecast = validForecasts.find(f => f.label === `${selectedDay}d`);
   
@@ -32,7 +31,6 @@ export function ForecastSlider({ forecasts, currentPrice }: ForecastSliderProps)
     <div className="rounded-xl border bg-white p-6 shadow-sm">
       <h2 className="text-xl font-semibold text-gray-800 mb-6">Price Forecast</h2>
       
-      {/* Main forecast display */}
       <div className="text-center mb-8">
         <div className="text-sm font-medium text-gray-500 mb-2">
           {selectedDay} Day{selectedDay !== 1 ? 's' : ''} from now
@@ -55,7 +53,6 @@ export function ForecastSlider({ forecasts, currentPrice }: ForecastSliderProps)
         )}
       </div>
 
-      {/* Slider */}
       <div className="mb-6">
         <div className="flex justify-between text-sm text-gray-500 mb-2">
           <span>1 day</span>
@@ -78,7 +75,6 @@ export function ForecastSlider({ forecasts, currentPrice }: ForecastSliderProps)
         </div>
       </div>
 
-      {/* Quick access buttons */}
       <div className="grid grid-cols-4 gap-2">
         {[1, 3, 7, 30].filter(day => day <= maxDays).map((day) => {
           const forecast = validForecasts.find(f => f.label === `${day}d`);
@@ -115,7 +111,6 @@ export function ForecastSlider({ forecasts, currentPrice }: ForecastSliderProps)
         })}
       </div>
 
-      {/* Disclaimer */}
       <div className="mt-6 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
         <p className="text-xs text-yellow-700">
           ⚠️ Forecasts are model predictions and become less reliable over longer time horizons. 

@@ -16,21 +16,18 @@ def get_conn():
     missing = [k for k,v in {"DB_HOST":host,"DB_NAME":db,"DB_USER":user,"DB_PASS":pwd}.items() if not v]
     if missing:
         raise RuntimeError(f"Missing DB envs: {missing}")
-    # If your Supabase requires SSL, uncomment sslmode="require"
     return psycopg.connect(host=host, dbname=db, user=user, password=pwd, port=port)  # , sslmode="require"
 
 def get_symbols():
     raw = os.getenv("SYMBOLS", "BTC-USD")
     return [s.strip() for s in raw.split(",") if s.strip()]
 
-# --- Providers (no API key) ---
 HEADERS = {"User-Agent": "cryptopipe/0.1 (+https://github.com/you/cryptopipe)"}
 STEP_SEC = 3600
 BITSTAMP_MAX = 1000
 KRAKEN_MAX = 720
 
 def bitstamp_pair(symbol_std: str) -> str:
-    # "BTC-USD" -> "btcusd"
     return symbol_std.replace("-", "").lower()
 
 def kraken_pair(symbol_std: str) -> str:
@@ -39,18 +36,12 @@ def kraken_pair(symbol_std: str) -> str:
     return f"{base}{quote.upper()}"
 
 def fetch_bitstamp_page(
-    symbol_code: str,  # e.g. "btcusd"
+    symbol_code: str,
     end_ts: int,
     limit: int = BITSTAMP_MAX,
     session: requests.Session | None = None,
 ):
-    """
-    Returns:
-      - list[dict] with keys: openTime, closeTime, open, high, low, close, volume
-      - [] if no more data
-      - None if 404 (pair not listed)
-    Raises HTTPError for other non-2xx.
-    """
+   
     s = session or requests.Session()
     url = f"https://www.bitstamp.net/api/v2/ohlc/{symbol_code}/"
     params = {
@@ -112,7 +103,6 @@ def backfill_bitstamp(symbol: str, backfill_days: int, conn):
         if not page:
             break
 
-        # normalize to bronze rows and insert
         rows = normalize_to_bronze_rows(symbol, page)
         inserted = upsert_bronze(conn, rows)
         total += inserted
@@ -122,22 +112,17 @@ def backfill_bitstamp(symbol: str, backfill_days: int, conn):
         if earliest_in_page <= earliest_needed:
             break
 
-        time.sleep(0.25)  # be polite
+        time.sleep(0.25)
 
     print(f"[{symbol}] Backfill inserted (or deduped) {total} rows.")
 
-# ------------ Kraken fetch (fallback) ------------
 def fetch_kraken(symbol_std: str, limit: int = 300):
-    """
-    Returns payload-shaped rows like Bitstamp:
-    openTime, closeTime, open, high, low, close, volume
-    """
     url = "https://api.kraken.com/0/public/OHLC"
     pair = kraken_pair(symbol_std)
     r = requests.get(url, params={"pair": pair, "interval": 60}, headers=HEADERS, timeout=30)
     r.raise_for_status()
     data = r.json()
-    arr = data["result"][pair]  # [time, open, high, low, close, vwap, volume, count]
+    arr = data["result"][pair]
     if limit:
         arr = arr[-min(limit, KRAKEN_MAX):]
     rows = []
@@ -155,7 +140,6 @@ def fetch_kraken(symbol_std: str, limit: int = 300):
     rows.sort(key=lambda p: p["openTime"])
     return rows
 
-# ------------ Normalization + DB ------------
 def normalize_to_bronze_rows(symbol_std: str, payload_rows):
     out = []
     for p in payload_rows:
@@ -176,14 +160,12 @@ def upsert_bronze(conn, rows):
     conn.commit()
     return len(rows)
 
-# ------------ Main orchestration ------------
 def main():
     symbols = get_symbols()
     backfill_days = int(os.getenv("BACKFILL_DAYS", "0"))
     print("Symbols:", symbols, "| BACKFILL_DAYS:", backfill_days)
 
     with get_conn() as conn:
-        # 1) Optional backfill per symbol (Bitstamp only)
         if backfill_days > 0:
             for sym in symbols:
                 try:
@@ -191,7 +173,6 @@ def main():
                 except Exception as e:
                     print(f"[{sym}] Unhandled backfill error: {e!r}. Skipping.")
 
-        # 2) Recent top-up (Bitstamp → Kraken fallback)
         for sym in symbols:
             try:
                 page = fetch_bitstamp_page(bitstamp_pair(sym), end_ts=int(time.time()), limit=300)

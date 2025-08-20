@@ -6,13 +6,11 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
-import subprocess
 import asyncio
 from datetime import datetime
 from typing import Dict, Any
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -22,16 +20,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS middleware for frontend communication
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Update with your Vercel domain in production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Global state to track pipeline runs
 pipeline_status = {
     "is_running": False,
     "last_run": None,
@@ -88,7 +84,6 @@ async def run_pipeline_background():
         pipeline_status["progress"] = "Starting data ingestion..."
         logger.info("Starting data pipeline...")
         
-        # Step 1: Data Ingestion
         stdout, stderr, returncode = await run_python_script("ingest.py")
         if returncode != 0:
             raise Exception(f"Ingestion failed: {stderr}")
@@ -96,7 +91,6 @@ async def run_pipeline_background():
         logger.info("Data ingestion completed successfully")
         pipeline_status["progress"] = "Data ingestion complete. Starting ML training..."
         
-        # Step 2: ML Model Training and Prediction
         stdout, stderr, returncode = await run_python_script("generate_insight.py")
         if returncode != 0:
             raise Exception(f"Insight generation failed: {stderr}")
@@ -123,7 +117,6 @@ async def refresh_data(background_tasks: BackgroundTasks):
             detail="Pipeline is already running. Please wait for completion."
         )
     
-    # Start the pipeline in background
     background_tasks.add_task(run_pipeline_background)
     
     return PipelineResponse(
@@ -137,9 +130,64 @@ async def refresh_data(background_tasks: BackgroundTasks):
         }
     )
 
+@app.post("/refresh-data-sync", response_model=PipelineResponse)
+async def refresh_data_sync():
+    
+    if pipeline_status["is_running"]:
+        raise HTTPException(
+            status_code=409, 
+            detail="Pipeline is already running. Please wait for completion."
+        )
+    
+    try:
+        pipeline_status["is_running"] = True
+        pipeline_status["progress"] = "Starting data ingestion..."
+        logger.info("Starting synchronous data pipeline...")
+        
+        # Step 1: Data Ingestion
+        stdout1, stderr1, returncode1 = await run_python_script("ingest.py")
+        if returncode1 != 0:
+            raise Exception(f"Ingestion failed: {stderr1}")
+        
+        logger.info("Data ingestion completed successfully")
+        pipeline_status["progress"] = "Data ingestion complete. Starting ML training..."
+        
+        # Step 2: ML Model Training and Prediction
+        stdout2, stderr2, returncode2 = await run_python_script("generate_insight.py")
+        if returncode2 != 0:
+            raise Exception(f"Insight generation failed: {stderr2}")
+        
+        logger.info("ML training and prediction completed successfully")
+        pipeline_status["progress"] = "Pipeline completed successfully"
+        pipeline_status["last_run"] = datetime.utcnow().isoformat()
+        pipeline_status["last_error"] = None
+        
+        return PipelineResponse(
+            success=True,
+            message="Data pipeline completed successfully",
+            timestamp=datetime.utcnow().isoformat(),
+            details={
+                "duration": "Pipeline completed synchronously",
+                "steps_completed": ["Data ingestion", "ML model training", "Forecast generation"],
+                "ingestion_output": stdout1[-500:] if stdout1 else "No output",
+                "ml_output": stdout2[-500:] if stdout2 else "No output"
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Synchronous pipeline failed: {e}")
+        pipeline_status["last_error"] = str(e)
+        pipeline_status["progress"] = f"Pipeline failed: {str(e)}"
+        
+        raise HTTPException(
+            status_code=500,
+            detail=f"Pipeline execution failed: {str(e)}"
+        )
+    finally:
+        pipeline_status["is_running"] = False
+
 @app.post("/ingest-only")
 async def ingest_only():
-    """Run only the data ingestion step"""
     if pipeline_status["is_running"]:
         raise HTTPException(
             status_code=409, 
@@ -172,7 +220,6 @@ async def ingest_only():
 
 @app.post("/generate-forecasts")
 async def generate_forecasts():
-    """Run only the ML model training and forecast generation"""
     if pipeline_status["is_running"]:
         raise HTTPException(
             status_code=409, 
@@ -205,7 +252,6 @@ async def generate_forecasts():
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check for monitoring"""
     try:
         # Check if we can import required modules
         import psycopg

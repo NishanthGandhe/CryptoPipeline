@@ -8,19 +8,16 @@ import { ForecastSlider } from "./components/ForecastSlider";
 import { SkeletonLoader } from "./components/SkeletonLoader";
 
 export default function Page() {
-  // The first symbol from the list is used as the default
   const [symbol, setSymbol] = useState("BTC-USD");
   const { data, loading, error, symbols, refresh, isRefreshing, lastRefreshTime } = useCryptoData(symbol);
 
-  // Add keyboard shortcuts
   useEffect(() => {
     const handleKeyPress = (e: KeyboardEvent) => {
-      // Ctrl/Cmd + R for refresh (only if not already refreshing)
       if ((e.ctrlKey || e.metaKey) && e.key === 'r' && !isRefreshing) {
         e.preventDefault();
         refresh();
       }
-      // Arrow keys for cycling through symbols
+
       if (symbols.length > 0 && !isRefreshing) {
         const currentIndex = symbols.indexOf(symbol);
         if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
@@ -40,7 +37,6 @@ export default function Page() {
     return () => window.removeEventListener('keydown', handleKeyPress);
   }, [symbol, symbols, refresh, isRefreshing]);
 
-  // Update the default symbol once the full list is loaded
   useState(() => {
     if (symbols.length > 0 && symbol !== symbols[0]) {
       setSymbol(symbols[0]);

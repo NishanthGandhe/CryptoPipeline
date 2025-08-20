@@ -1,8 +1,7 @@
 import { formatUSD, formatPercent, formatUSDShort, cn } from "@/lib/utils";
 import { LatestRow, ProcessedForecast } from "@/lib/types";
-import { InformationCircleIcon } from '@heroicons/react/24/outline'; // New icon import
+import { InformationCircleIcon } from '@heroicons/react/24/outline'; 
 
-// Helper component for the yellow alert box
 function Alert({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-md bg-yellow-50 p-4">
@@ -18,7 +17,6 @@ function Alert({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Updated StatBox with vertical layout and shortened numbers
 function StatBox({ forecast }: { forecast: ProcessedForecast }) {
   const isPositive = forecast.change ? forecast.change > 0 : false;
   const isNeutral = forecast.change === 0;
@@ -41,9 +39,7 @@ function StatBox({ forecast }: { forecast: ProcessedForecast }) {
   );
 }
 
-// A new component to display model metrics cleanly
 function ModelDetails({ insight }: { insight: LatestRow }) {
-  // Example parsing - adjust if your headline/details format is different
   const maeMatch = insight.details.match(/MAE=(\d+\.?\d*)/);
   const vsNaiveMatch = insight.details.match(/vs naive: ([+-]?\d+%)/);
   const ciMatch = insight.details.match(/95% CI \[\$(.*), \$(.*)\]/);
@@ -105,9 +101,6 @@ export function ForecastCard({ latestInsight, forecasts }: { latestInsight: Late
 
       <div className="mt-6">
         <h3 className="text-base font-semibold text-gray-700">Long-Term Outlook</h3>
-        {/*
-          START: THIS IS THE RESTORED TABLE CODE
-        */}
         <table className="mt-2 w-full text-sm">
           <thead className="text-left">
             <tr className="border-b text-gray-500">
@@ -141,15 +134,9 @@ export function ForecastCard({ latestInsight, forecasts }: { latestInsight: Late
             })}
           </tbody>
         </table>
-         {/*
-          END: RESTORED TABLE CODE
-        */}
       </div>
 
       <ModelDetails insight={latestInsight} />
     </div>
   );
 }
-
-// NOTE: You'll need to install @heroicons/react to use the icon
-// npm install @heroicons/react

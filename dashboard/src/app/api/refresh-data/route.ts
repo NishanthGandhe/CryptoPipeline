@@ -9,8 +9,8 @@ export async function POST(_request: NextRequest) {
     console.log('Triggering data refresh via backend API...');
     console.log('Backend URL:', BACKEND_URL);
     
-    // Call the backend's refresh endpoint
-    const response = await fetch(`${BACKEND_URL}/refresh-data`, {
+    // Call the backend's refresh endpoint (synchronous version that waits for completion)
+    const response = await fetch(`${BACKEND_URL}/refresh-data-sync`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

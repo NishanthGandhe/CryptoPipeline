@@ -1,4 +1,4 @@
-import { ChevronUpDownIcon } from '@heroicons/react/20/solid'; // New icon import
+import { ChevronUpDownIcon } from '@heroicons/react/20/solid';
 
 type SymbolSelectorProps = {
   symbols: string[];
@@ -32,6 +32,3 @@ export function SymbolSelector({ symbols, selectedSymbol, onSelectSymbol, disabl
     </div>
   );
 }
-
-// NOTE: You'll also need @heroicons/react for this component.
-// npm install @heroicons/react

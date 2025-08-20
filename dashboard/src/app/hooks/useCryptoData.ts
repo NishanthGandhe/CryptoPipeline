@@ -3,14 +3,13 @@ import { supabase } from "@/lib/supabase";
 import { ALL_HORIZONS, daysToLabelFromBase } from "@/lib/constants";
 import { PriceRow, LatestRow, MultiForecastRow, ProcessedForecast, ModelInfo } from "@/lib/types";
 
-// Centralized data fetching and processing hook
 export function useCryptoData(symbol: string) {
   const [symbols, setSymbols] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [refreshKey, setRefreshKey] = useState(0); // Add refresh trigger
-  const [isRefreshing, setIsRefreshing] = useState(false); // Track pipeline refresh status
-  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null); // Track last successful refresh
+  const [refreshKey, setRefreshKey] = useState(0); 
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastRefreshTime, setLastRefreshTime] = useState<Date | null>(null);
   const [data, setData] = useState<{
     symbol: string;
     series: PriceRow[];
@@ -20,7 +19,6 @@ export function useCryptoData(symbol: string) {
     modelInfo: ModelInfo | null;
   } | null>(null);
 
-  // Enhanced refresh function to trigger actual data pipeline
   const refresh = async () => {
     setIsRefreshing(true);
     setError(null);
@@ -28,7 +26,6 @@ export function useCryptoData(symbol: string) {
     try {
       console.log('Triggering data pipeline refresh...');
       
-      // Use external API URL in production
       const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || '';
       const refreshUrl = apiBaseUrl ? `${apiBaseUrl}/refresh-data` : '/api/refresh-data';
       
@@ -47,10 +44,8 @@ export function useCryptoData(symbol: string) {
       
       console.log('Pipeline completed successfully:', result);
       
-      // Record successful refresh time
       setLastRefreshTime(new Date());
       
-      // After successful pipeline run, trigger data refetch
       setRefreshKey(prev => prev + 1);
       
     } catch (error: unknown) {
@@ -62,7 +57,6 @@ export function useCryptoData(symbol: string) {
     }
   };
 
-  // Helper function to generate model information based on forecast method
   const getModelInfo = (method: string, symbol: string): ModelInfo => {
     switch (method) {
       case 'xgboost':
@@ -101,12 +95,10 @@ export function useCryptoData(symbol: string) {
     }
   };
 
-  // Effect to load the list of available symbols once on mount
   useEffect(() => {
     const fetchSymbols = async () => {
       try {
         console.log("Fetching symbols...");
-        // Try to get symbols from insights table instead
         const { data, error } = await supabase
           .from("insights")
           .select("symbol")
@@ -114,7 +106,6 @@ export function useCryptoData(symbol: string) {
         
         if (error) {
           console.error("Failed to fetch symbols:", error);
-          // Fallback to hardcoded list if database fails
           const fallbackSymbols = [
             "BTC-USD", "ETH-USD", "XRP-USD", "LTC-USD", "BCH-USD", "LINK-USD",
             "ADA-USD", "XLM-USD", "SOL-USD", "DOT-USD", "DOGE-USD", "AVAX-USD",
@@ -126,13 +117,11 @@ export function useCryptoData(symbol: string) {
           return;
         }
         
-        // Get unique symbols
         const uniqueSymbols = [...new Set(data?.map(d => d.symbol) || [])];
         console.log("Fetched symbols from DB:", uniqueSymbols);
         setSymbols(uniqueSymbols);
       } catch (e) {
         console.error("Connection error:", e);
-        // Fallback to hardcoded list
         const fallbackSymbols = [
           "BTC-USD", "ETH-USD", "XRP-USD", "LTC-USD", "BCH-USD", "LINK-USD",
           "ADA-USD", "XLM-USD", "SOL-USD", "DOT-USD", "DOGE-USD", "AVAX-USD",
@@ -146,7 +135,6 @@ export function useCryptoData(symbol: string) {
     fetchSymbols();
   }, []);
 
-  // Effect to fetch and process data when the symbol changes
   useEffect(() => {
     if (!symbol) return;
 
@@ -165,7 +153,6 @@ export function useCryptoData(symbol: string) {
         const latestInsight = (latestRows && latestRows[0]) as LatestRow | null;
         const multiForecasts = (mfRows || []) as MultiForecastRow[];
 
-        // --- Data Processing ---
         const currentPrice = series.length > 0 ? series[series.length - 1].close : null;
         
         const forecastMap: Record<string, MultiForecastRow> = {};
@@ -192,7 +179,6 @@ export function useCryptoData(symbol: string) {
           };
         });
 
-        // Get model info from the first forecast's method
         const forecastMethod = multiForecasts.length > 0 ? multiForecasts[0].forecast_method : 'unknown';
         const modelInfo = getModelInfo(forecastMethod, symbol);
 
@@ -214,7 +200,7 @@ export function useCryptoData(symbol: string) {
     };
 
     fetchDataForSymbol();
-  }, [symbol, refreshKey]); // Add refreshKey as dependency
+  }, [symbol, refreshKey]);
 
   return { data, loading, error, symbols, refresh, isRefreshing, lastRefreshTime };
 }
