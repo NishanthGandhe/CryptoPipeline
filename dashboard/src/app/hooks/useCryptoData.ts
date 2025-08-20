@@ -28,7 +28,11 @@ export function useCryptoData(symbol: string) {
     try {
       console.log('Triggering data pipeline refresh...');
       
-      const response = await fetch('/api/refresh-data', {
+      // Use external API URL in production
+      const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || '';
+      const refreshUrl = apiBaseUrl ? `${apiBaseUrl}/refresh-data` : '/api/refresh-data';
+      
+      const response = await fetch(refreshUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
