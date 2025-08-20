@@ -15,7 +15,6 @@ import xgboost as xgb
 from sklearn.preprocessing import MinMaxScaler
 from statsmodels.tsa.api import ExponentialSmoothing
 
-# --- Configuration ---
 load_dotenv()
 DB_USER = os.getenv("DB_USER")
 DB_PASS = os.getenv("DB_PASS")
