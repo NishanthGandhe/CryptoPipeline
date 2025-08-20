@@ -36,17 +36,18 @@ An AI-powered cryptocurrency price prediction system that combines machine learn
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
 │   Data Sources  │    │   Data Pipeline  │    │    Dashboard UI     │
-│                 │    │                  │    │                     │
+│                 │    │   (Railway)      │    │     (Vercel)        │
 │ • Crypto APIs   │───▶│ • ingest.py      │───▶│ • Next.js Frontend  │
 │ • Price Feeds   │    │ • transform.sql  │    │ • Interactive Charts│
 │ • Volume Data   │    │ • generate_      │    │ • Forecast Slider   │
 │                 │    │   insight.py     │    │ • Model Info        │
-└─────────────────┘    └──────────────────┘    └─────────────────────┘
+└─────────────────┘    │ • FastAPI        │    └─────────────────────┘
+                       └──────────────────┘               │
                                 │                          │
                                 ▼                          │
                        ┌──────────────────┐               │
                        │  PostgreSQL DB   │               │
-                       │                  │               │
+                       │   (Supabase)     │               │
                        │ • price_daily    │◀──────────────┘
                        │ • model_forecasts│
                        │ • insights       │

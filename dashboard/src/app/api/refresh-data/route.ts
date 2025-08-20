@@ -1,108 +1,82 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-import path from 'path';
-import fs from 'fs';
 
-const execAsync = promisify(exec);
+// Get backend URL from environment variable
+const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || process.env.BACKEND_URL || 'http://localhost:8000';
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function POST(_request: NextRequest) {
   try {
-    console.log('Starting data refresh pipeline...');
+    console.log('Triggering data refresh via backend API...');
+    console.log('Backend URL:', BACKEND_URL);
     
-    // Path to the pipeline directory
-    const pipelineDir = path.join(process.cwd(), '..', 'pipeline');
-    
-    // Check if pipeline directory exists
-    if (!fs.existsSync(pipelineDir)) {
-      throw new Error(`Pipeline directory not found: ${pipelineDir}`);
-    }
-    
-    // Check if required scripts exist
-    const ingestPath = path.join(pipelineDir, 'ingest.py');
-    const insightPath = path.join(pipelineDir, 'generate_insight.py');
-    
-    if (!fs.existsSync(ingestPath)) {
-      throw new Error(`ingest.py not found at: ${ingestPath}`);
-    }
-    
-    if (!fs.existsSync(insightPath)) {
-      throw new Error(`generate_insight.py not found at: ${insightPath}`);
-    }
-    
-    console.log(`Pipeline directory: ${pipelineDir}`);
-    console.log(`Running ingest.py from: ${ingestPath}`);
-    
-    // First run ingest.py to get fresh data
-    const ingestResult = await execAsync('python3 ingest.py', {
-      cwd: pipelineDir,
-      timeout: 300000, // 5 minute timeout
-      env: { ...process.env } // Pass environment variables
+    // Call the backend's refresh endpoint
+    const response = await fetch(`${BACKEND_URL}/refresh-data`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      // 15 minute timeout for the full pipeline
+      signal: AbortSignal.timeout(900000)
     });
     
-    console.log('Ingest completed successfully');
-    console.log('Ingest stdout:', ingestResult.stdout);
-    if (ingestResult.stderr) {
-      console.log('Ingest stderr:', ingestResult.stderr);
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Backend API error: ${response.status} ${response.statusText} - ${errorText}`);
     }
     
-    console.log(`Running generate_insight.py from: ${insightPath}`);
+    const result = await response.json();
     
-    // Then run generate_insight.py to update forecasts
-    const insightResult = await execAsync('python3 generate_insight.py', {
-      cwd: pipelineDir,
-      timeout: 600000, // 10 minute timeout for ML processing
-      env: { ...process.env } // Pass environment variables
-    });
-    
-    console.log('Insight generation completed successfully');
-    console.log('Insight stdout:', insightResult.stdout);
-    if (insightResult.stderr) {
-      console.log('Insight stderr:', insightResult.stderr);
-    }
+    console.log('Backend refresh completed successfully');
     
     return NextResponse.json({ 
       success: true, 
-      message: 'Data pipeline completed successfully',
+      message: 'Data pipeline completed successfully via backend',
       timestamp: new Date().toISOString(),
-      details: {
-        pipelineDir,
-        ingest: {
-          stdout: ingestResult.stdout.slice(-1000), // Last 1000 chars to avoid huge responses
-          stderr: ingestResult.stderr?.slice(-1000) || null
-        },
-        insight: {
-          stdout: insightResult.stdout.slice(-1000),
-          stderr: insightResult.stderr?.slice(-1000) || null
-        }
-      }
+      backend_response: result
     });
     
   } catch (error: unknown) {
-    console.error('Pipeline execution failed:', error);
+    console.error('Backend API call failed:', error);
     
-    // More detailed error information
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-    const errorDetails = {
-      message: errorMessage,
-      code: error && typeof error === 'object' && 'code' in error ? (error as { code: unknown }).code : undefined,
-      killed: error && typeof error === 'object' && 'killed' in error ? (error as { killed: unknown }).killed : undefined,
-      signal: error && typeof error === 'object' && 'signal' in error ? (error as { signal: unknown }).signal : undefined,
-      cmd: error && typeof error === 'object' && 'cmd' in error ? (error as { cmd: unknown }).cmd : undefined,
-      stdout: error && typeof error === 'object' && 'stdout' in error ? 
-        typeof (error as { stdout: unknown }).stdout === 'string' ? 
-        ((error as { stdout: string }).stdout).slice(-1000) : null : null,
-      stderr: error && typeof error === 'object' && 'stderr' in error ? 
-        typeof (error as { stderr: unknown }).stderr === 'string' ? 
-        ((error as { stderr: string }).stderr).slice(-1000) : null : null
-    };
+    
+    // Handle timeout specifically
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      return NextResponse.json({ 
+        success: false, 
+        message: 'Data pipeline timed out (still may be running in background)',
+        timestamp: new Date().toISOString(),
+        error: {
+          type: 'timeout',
+          message: errorMessage,
+          suggestion: 'Try refreshing the page in a few minutes to see if data was updated'
+        }
+      }, { status: 504 });
+    }
+    
+    // Handle network errors
+    if (error instanceof Error && (error.message.includes('fetch') || error.message.includes('ECONNREFUSED'))) {
+      return NextResponse.json({ 
+        success: false, 
+        message: 'Could not connect to backend service',
+        timestamp: new Date().toISOString(),
+        error: {
+          type: 'connection',
+          message: errorMessage,
+          backend_url: BACKEND_URL,
+          suggestion: 'Backend service may be starting up or unavailable'
+        }
+      }, { status: 503 });
+    }
     
     return NextResponse.json({ 
       success: false, 
       message: 'Data pipeline failed',
       timestamp: new Date().toISOString(),
-      error: errorDetails
+      error: {
+        type: 'unknown',
+        message: errorMessage
+      }
     }, { status: 500 });
   }
 }
