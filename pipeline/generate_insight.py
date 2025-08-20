@@ -48,6 +48,7 @@ HORIZONS = [
 
 TRAIN_WINDOW_DAYS = int(os.getenv("TRAIN_WINDOW_DAYS", "365"))
 PREFER_NON_NAIVE_EPS = float(os.getenv("MODEL_PREFER_NON_NAIVE_EPS", "0.02"))  # 2%
+PREFER_DYNAMIC_THRESHOLD = float(os.getenv("PREFER_DYNAMIC_THRESHOLD", "0.05"))  # 5%
 LOG_SPACE = os.getenv("LOG_SPACE", "1").lower() in ("1", "true", "yes")
 USE_PROPHET = os.getenv("USE_PROPHET", "0").lower() in ("1", "true", "yes")
 USE_DEEP = os.getenv("USE_DEEP", "0").lower() in ("1", "true", "yes")
@@ -334,16 +335,16 @@ def train_candidates(df):
 
     # --- selection by MAE% ---
     finite = [c for c in cand if math.isfinite(c["mae_pct"])]
-    finite.sort(key=lambda c: c["mae_pct"])
+    finite.sort(key=lambda c: c["mae"])
     best = finite[0] if finite else cand[0]
 
     # prefer non-naive if close to naive
-    naive_c = next((c for c in finite if c["type"] == "naive"), None)
-    non_naives = [c for c in finite if c["type"] != "naive"]
-    if naive_c and best["type"] == "naive" and non_naives:
-        best_nn = min(non_naives, key=lambda c: c["mae_pct"])
-        if (best_nn["mae_pct"] - naive_c["mae_pct"]) / max(naive_c["mae_pct"], 1e-9) <= PREFER_NON_NAIVE_EPS:
-            best = best_nn
+    naive_c = next((c for c in cand if c.get("type") == "naive"), None)
+    base = naive_c["mae"] if naive_c and math.isfinite(naive_c["mae"]) else None
+    if best["method"] == "naive_close" and base and math.isfinite(base):
+        alt = next((c for c in finite if c.get("type") in ("hw", "sarimax") and math.isfinite(c["mae"])), None)
+        if alt and alt["mae"] <= base * (1.0 + PREFER_DYNAMIC_THRESHOLD):
+            best = alt
 
     # 1-step (next day) for headline
     bt = best["type"]
