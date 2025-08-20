@@ -4,7 +4,7 @@
 
 **Production-ready AI cryptocurrency prediction platform** with automated ML pipeline, cloud deployment, and real-time forecasting for 22+ cryptocurrencies.
 
-![CryptoPipeline Dashboard](https://github.com/user-attachments/assets/YOUR_IMAGE_ID_HERE)
+![CryptoPipeline Dashboard](https://github.com/nishanthgandhe/CryptoPipeline/blob/main/image.png)
 *Live dashboard showing Bitcoin forecasting with XGBoost Enhanced model, interactive 1-30 day prediction slider, and real-time price charts*
 
 > **🎯 Key Achievement**: 95.5% of cryptocurrencies successfully use advanced XGBoost models with 14+ technical indicators for aggressive trend predictions.
